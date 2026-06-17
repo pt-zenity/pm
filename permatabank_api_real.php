@@ -34,8 +34,8 @@
 // ======= KONFIGURASI PROFIL (dari agen.sql + agen_apigateway_supplier.sql)
 // ==============================================================
 
-// Pilih profil aktif: 'sekar_kaltim' | 'anjuk_ladang' | 'supplier0025' | 'custom'
-$_ACTIVE_PROFILE = 'supplier0025';
+// Pilih profil aktif: 'sekar_kaltim' | 'anjuk_ladang' | 'bpr_pas' | 'custom'
+$_ACTIVE_PROFILE = 'bpr_pas';
 
 $_PROFILES = [
 
@@ -72,9 +72,9 @@ $_PROFILES = [
     ],
 
     // --------------------------------------------------------
-    // A-000300 | Supplier 0025 | VAClientKey diperbarui
+    // A-000300 | BPR PAS | Supplier 0025 | VAClientKey diperbarui
     // --------------------------------------------------------
-    'supplier0025' => [
+    'bpr_pas' => [
         'base_url'      => 'http://switching.mcoll.sis1.net',
         'client_key'    => 'b779f2aeaa628a251684696c12a3d403',
         'client_secret' => 'GANTI_CLIENT_SECRET',
