@@ -35,7 +35,7 @@
 // ==============================================================
 
 // Pilih profil aktif: 'sekar_kaltim' | 'anjuk_ladang' | 'supplier0025' | 'custom'
-$_ACTIVE_PROFILE = 'sekar_kaltim';
+$_ACTIVE_PROFILE = 'supplier0025';
 
 $_PROFILES = [
 
@@ -72,17 +72,17 @@ $_PROFILES = [
     ],
 
     // --------------------------------------------------------
-    // A-000268 | Supplier 0025 | VAClientKey dari ID=15
+    // A-000300 | Supplier 0025 | VAClientKey diperbarui
     // --------------------------------------------------------
     'supplier0025' => [
         'base_url'      => 'http://switching.mcoll.sis1.net',
-        'client_key'    => 'd37ca43b-509e-4b07-b1ba-37c66aecb585',
+        'client_key'    => 'b779f2aeaa628a251684696c12a3d403',
         'client_secret' => 'GANTI_CLIENT_SECRET',
-        'partner_id'    => 'A-000268',
+        'partner_id'    => 'A-000300',
         'channel_id'    => '95221',
         'bin'           => '',
         'supplier_code' => '0025',
-        'supplier_name' => 'Permata SNAP BI',
+        'supplier_name' => 'Permata SNAP BI — A-000300',
         'api_key_va'    => '',
     ],
 
