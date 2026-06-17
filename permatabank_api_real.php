@@ -133,11 +133,15 @@ $_TOKEN_CACHE = ['access_token' => '', 'expires_at' => 0];
 // ==============================================================
 
 /**
- * Timestamp ISO8601 — format persis seperti date("c") di PHP
+ * Timestamp ISO8601 dengan offset +07:00 — sesuai contoh real server:
+ *   2026-06-17T22:30:00+07:00
+ * Menggunakan Asia/Jakarta agar offset selalu +07:00 (WIB).
+ * (date('c') kadang menghasilkan +00:00 jika server UTC)
  */
 function snapTimestamp(): string
 {
-    return date('c');
+    $dt = new DateTime('now', new DateTimeZone('Asia/Jakarta'));
+    return $dt->format('Y-m-d\TH:i:sP');  // contoh: 2026-06-17T22:30:00+07:00
 }
 
 /**
@@ -183,12 +187,13 @@ function getClientSecret(): string
 /**
  * Signature untuk /b2b/token
  *
- * Dari cekAuthorizationToken(): server TIDAK memvalidasi x-signature untuk token.
- * Header ini tetap dikirim (standar SNAP BI) tapi server hanya cek x-client-key di DB.
+ * KONFIRMASI DARI UJI REAL (2026-06-17):
+ *   X-SIGNATURE: TEST → server tetap return 200 + accessToken
+ *   → server SAMA SEKALI tidak validasi x-signature pada endpoint token
+ *   → cukup kirim X-CLIENT-KEY yang valid di DB
  *
- * Formula standar SNAP BI:
- *   message   = clientKey + "|" + timestamp
- *   signature = Base64( HMAC-SHA256( message, clientSecret ) )
+ * Kita tetap kirim signature standar SNAP BI agar header lengkap,
+ * tapi nilainya tidak berpengaruh pada hasil.
  */
 function genTokenSignature(string $clientKey, string $timestamp, string $clientSecret): string
 {
@@ -260,9 +265,10 @@ function httpPost(string $url, array $headers, string $body): array
 /**
  * generateToken() — raw HTTP request ke /access-token/b2b
  *
- * TEMUAN SOURCE CODE (cekAuthorizationToken):
+ * TEMUAN SOURCE CODE + KONFIRMASI UJI REAL (2026-06-17):
  *  - Server HANYA cek x-client-key ada di agen_apigateway_supplier.VAClientKey
- *  - x-signature TIDAK divalidasi (kode validasi ada tapi di-comment out)
+ *  - x-signature TIDAK divalidasi sama sekali (X-SIGNATURE: TEST pun lolos)
+ *  - responseCode sukses = '2007300' (bukan '2002400')
  *  - 401XX00 = x-client-key tidak ada di database
  *
  * Gunakan getToken() untuk pemakaian normal (dengan cache otomatis).
@@ -294,7 +300,7 @@ function generateToken(): array
         'sig_message' => $clientKey . '|' . $timestamp,
         'x_signature' => $signature,
         'body'        => $jsonBody,
-        'note'        => 'Server cek x-client-key di agen_apigateway_supplier.VAClientKey, 401XX00 = key tidak ditemukan',
+        'note'        => 'Server cek x-client-key di DB. X-SIGNATURE tidak divalidasi (TEST pun lolos). RC sukses=2007300',
     ];
 
     $result = httpPost($url, $headers, $jsonBody);
@@ -315,7 +321,11 @@ function generateToken(): array
     $rc      = $decoded['responseCode']    ?? '';
     $msg     = $decoded['responseMessage'] ?? '';
 
-    if (!isset($decoded['accessToken'])) {
+    // Sukses token: responseCode '2007300' (konfirmasi uji real 2026-06-17)
+    // Fallback: cek keberadaan accessToken jika responseCode berbeda
+    $isSuccess = ($rc === '2007300') || isset($decoded['accessToken']);
+
+    if (!$isSuccess) {
         return [
             'success'        => false,
             'error'          => "[$rc] $msg",
