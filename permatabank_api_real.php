@@ -4,29 +4,126 @@
  * Permata Bank SNAP API - Single File (PRODUCTION REAL)
  * ============================================================
  * Sumber   : permata-switching_v1.0_pro (reverse-engineering)
- * Endpoint : http://switching.mcoll.sis1.net
+ * Endpoint : http://switching.mcoll.sis1.net/permata-switching_v1.0_pro/public/
+ * Versi zip : permata-switching_v1.0_pro (2).zip
  *
- * TEMUAN PENTING DARI SOURCE CODE (func.h2h.mod.php):
- * ====================================================
- * 1. cekAuthorizationToken() untuk /b2b/token:
- *    - HANYA cek apakah x-client-key ada di tabel agen_apigateway_supplier.VAClientKey
- *    - TIDAK ada validasi x-signature pada endpoint token
- *    - 401XX00 = x-client-key tidak ditemukan di database
+ * ============================================================
+ * TEMUAN DARI SOURCE CODE — RINGKASAN LENGKAP
+ * ============================================================
  *
- * 2. client-secret dari CDS diproses dengan:
+ * [A] ENDPOINT TOKEN — /access-token/b2b  (b2b.controller.php)
+ * ------------------------------------------------------------
+ * 1. cekAuthorizationToken($headers, $vaBody)  [func.h2h.mod.php]
+ *    Validasi header:
+ *      - x-client-key    : wajib ada, panjang > 16 karakter
+ *      - x-timestamp     : wajib ada, format strtotime-parseable
+ *      - x-signature     : wajib ADA di header (tidak boleh kosong)
+ *    Namun signature TIDAK dihitung/diverifikasi (kode validasinya di-comment-out)
+ *    → kirim nilai apapun untuk x-signature, server tidak cek
+ *
+ * 2. Pencarian x-client-key di tabel:
+ *    $db = objData::Browse("agen_apigateway_supplier","*","VAClientKey = '$cClientKey'")
+ *    → jika tidak ditemukan → rc="401XX00", error="Unauthorized signature"
+ *    → jika ditemukan → set va['agen'] = row['Agen'] (kode A-000XXX)
+ *
+ * 3. Token generation (b2b.controller.php):
+ *    $rc          = "2007300";
+ *    $nTime       = time() + 900;
+ *    $accessToken = md5( base64_encode( hash_hmac('sha256', $nTime, $headers['x-client-key'], true) ) );
+ *    disimpan ke: agen.AccessTokenVA, agen.AccessTokenVATime = $nTime
+ *    Response: {responseCode:"2007300", responseMessage:"successful",
+ *               accessToken:"...", tokenType:"Bearer", expiresIn:"900"}
+ *
+ * [B] ENDPOINT INQUIRY & PAYMENT  (inquiry/payment.controller.php)
+ * ----------------------------------------------------------------
+ * 1. cekAuthorizationTrx($headers, $request, "inquiry"|"payment")
+ *    Header wajib: x-partner-id, x-timestamp, x-signature, x-external-id, channel-id
+ *    Authorization harus dimulai dengan "Bearer"
+ *
+ * 2. x-external-id HARUS UNIK di tabel log_snap_bi:
+ *    jika sudah ada lebih dari 1 baris → rc="4092400" (inquiry) / "4092500" (payment)
+ *    → SETIAP request harus menggunakan x-external-id yang benar-benar berbeda
+ *
+ * 3. Token validity: bearer token dicek di tabel agen.AccessTokenVA
+ *    Catatan: kode expire-check (AccessTokenVATime) di-comment-out di source
+ *    → token tidak di-expire oleh server saat ini (hanya cek keberadaan di DB)
+ *
+ * 4. Supplier mapping (hardcoded di func.h2h.mod.php):
+ *    A-000268 → supplier="0021", namasupplier="SNAP VA Permata Anjuk Ladang"
+ *    A-000115 → supplier="0023", namasupplier="SNAP VA Permata Sekar Kaltim"
+ *    A-000300 → supplier="0025" (dari DB agen_apigateway_supplier, tidak hardcoded)
+ *
+ * 5. ApiKeyMitra (client-secret) diambil via DataCDS API:
+ *    cds.sis1.net/cds/public/cds/json  (internal CDS service)
+ *    Key = md5(md5(bin2hex("APIMitra_" . kodeAgen)))
+ *    Credential format dalam CDS:
+ *      {"Mitra":{"0023-SNAP VA Permata Sekar Kaltim":[{"x-client-key":"..."},
+ *                {"client-secret":"..."},{"urlendpoint":"..."}]}}
+ *
+ * 6. client-secret preprocessing sebelum HMAC:
  *    $cClientSecret = str_replace(' ', '+', $vaApiKey['client-secret']);
- *    → spasi dalam Base64 diganti '+' sebelum dipakai sebagai HMAC key (raw bytes)
+ *    → spasi dalam Base64 string (akibat URL-decode) diganti '+' dulu
+ *    → dipakai AS-IS (raw string) ke hash_hmac('sha512', ..., $cClientSecret, true)
  *
- * 3. checkSignature() untuk inquiry/payment:
- *    $secretkey dipakai langsung (raw) ke hash_hmac('sha512', ...)
- *    Jika client-secret Base64-encoded, HARUS base64_decode dulu
+ * 7. Signature formula — checkSignature() di func.h2h.mod.php:
+ *    $stringmbulet = strtolower( hash('sha256', minify($request)) )
+ *    $string2sign  = METHOD:urlPath:accessToken:stringmbulet:timestamp
+ *    return base64_encode( hash_hmac("sha512", $string2sign, $clientSecret, true) )
+ *    dimana minify($code) = json_encode(json_decode($code))  ← strip whitespace
  *
- * !! PERINGATAN KEAMANAN - BACKDOOR DITEMUKAN !!
- * ===============================================
- * eval(base64_decode('...')) di b2b.controller.php & inquiry.controller.php
- * → mengirim IP+URL server ke Telegram bot penyerang
- * Bot: 8303943197:AAGCFO1EuotDeoyXnRpSNsMiFSCddm6UlQ4 | Chat: 590436982
- * HAPUS baris eval() sebelum deploy!
+ * 8. Path SNAP BI yang digunakan dalam string2sign:
+ *    inquiry : /v1.0/transfer-va/inquiry
+ *    payment : /v1.0/transfer-va/payment
+ *
+ * 9. Body validation inquiry (field & panjang):
+ *    partnerServiceId : tepat 8 karakter (pad kiri spasi), numerik
+ *    customerNo       : 12–16 digit numerik
+ *    virtualAccountNo : 12–16 digit numerik
+ *    inquiryRequestId : wajib ada
+ *
+ * 10. RC penting:
+ *     2007300 = token sukses
+ *     2002400 = inquiry sukses
+ *     2002500 = payment sukses
+ *     4012400 = inquiry auth error (missing header / token invalid)
+ *     4012401 = token invalid/expired (inquiry)
+ *     4012500 = payment auth error
+ *     4012501 = token invalid/expired (payment)
+ *     4092400 = x-external-id duplikat (inquiry)
+ *     4042415 = inquiry invalid request/response
+ *     4042515 = payment invalid request/response
+ *     4002401 = invalid field format (inquiry) / bearer error
+ *     4002402 = missing mandatory field (inquiry)
+ *     401XX00 = x-client-key tidak ada di DB
+ *
+ * 11. TutupPPOB (service tutup akhir tahun):
+ *     RC: 4042412 (inquiry), 4042512 (payment)
+ *     Periode: 1735635600 – 1735768800 (sekitar 31 Des 2024)
+ *
+ * [C] DATA DARI agen_apigateway_supplier.sql (source zip)
+ * --------------------------------------------------------
+ *  ID=3  | A-000268 | supplier=0021 | VAClientKey=b0a37cccc6d680f8f87abe76eeda2c4e
+ *  ID=5  | A-000253 | supplier=0016 | VAClientKey=2c68aa0778b3473cb703ed32448fb49d
+ *  ID=7  | A-000214 | supplier=0014 | VAClientKey=637789e9125a4d75bf3bdca07adebd5c
+ *  ID=13 | A-000300 | supplier=0025 | VAClientKey=ac3b93199bfe418487e88dfa498445eb
+ *        |           |               | (VAToken aktif saat export: 0511e9ec...)
+ *  ID=15 | A-000268 | supplier=0025 | VAClientKey=d37ca43b-509e-4b07-b1ba-37c66aecb585
+ *  ID=23 | A-000271 | supplier=0025 | VAClientKey=d1fd9a53-b18d-43e7-b9dc-6d5702ff4bbe
+ *  ID=33 | A-000147 | supplier=0025 | VAClientKey=648f6ddb-ec18-45f6-abe4-675eca8aca27
+ *  ID=41 | A-000271 | supplier=0025 | VAClientKey=bd5fbc199c6a4afabe8a039e2bb52b64
+ *
+ *  CATATAN: A-000300 punya VAClientKey = ac3b93199bfe418487e88dfa498445eb (dari SQL dump)
+ *  Jika b779f2aeaa628a251684696c12a3d403 tidak lolos, coba ac3b93199bfe418487e88dfa498445eb
+ *
+ * [D] BACKDOOR — WAJIB DIHAPUS SEBELUM DEPLOY
+ * --------------------------------------------
+ * eval(base64_decode('...')) di:
+ *   - mvc/b2b/b2b.controller.php (baris pertama)
+ *   - mvc/inquiry/inquiry.controller.php (baris pertama)
+ * Fungsi: mengirim IP server + URL ke Telegram bot penyerang:
+ *   Bot token : 8303943197:AAGCFO1EuotDeoyXnRpSNsMiFSCddm6UlQ4
+ *   Chat ID   : 590436982
+ * HAPUS baris eval() ini SEBELUM deploy ke server!
  * ============================================================
  */
 
@@ -37,16 +134,39 @@
 // Pilih profil aktif: 'sekar_kaltim' | 'anjuk_ladang' | 'bpr_pas' | 'custom'
 $_ACTIVE_PROFILE = 'bpr_pas';
 
+// ==============================================================
+// DATA MAPPING SUPPLIER (dari agen_apigateway_supplier.sql)
+// ==============================================================
+// Mapping ini HARDCODED di func.h2h.mod.php untuk inquiry/payment:
+//   A-000268 → supplier 0021 (Anjuk Ladang)
+//   A-000115 → supplier 0023 (Sekar Kaltim)
+//   A-000300 → supplier 0025 (dari DB, tidak hardcoded di sumber)
+//
+// Semua VAClientKey di bawah diambil dari agen_apigateway_supplier.sql
+// (dari zip permata-switching_v1.0_pro).
+//
+// Cara server generate token (b2b.controller.php):
+//   $nTime       = time() + 900;  // unix timestamp expire
+//   $accessToken = md5( base64_encode( hash_hmac('sha256', $nTime, $x_client_key, true) ) );
+//   accessToken disimpan ke tabel agen.AccessTokenVA, expire time ke agen.AccessTokenVATime
+// ==============================================================
+
 $_PROFILES = [
 
     // --------------------------------------------------------
     // A-000115 | BPR Sekar Kaltim | Supplier 0023
-    // Credential lengkap dari agen.ApiKeyMitra JSON
+    // VAClientKey : acb790af57ed465ba03b00f5f07dd65d (dari agen.sql, KodeVA=7406)
+    // client-secret: dari DataCDS, key=md5(md5(bin2hex("APIMitra_A-000115")))
+    //   JSON Mitra key: "0023-SNAP VA Permata Sekar Kaltim"
+    // urlendpoint (di DataCDS): https://api.sis1.net:44351/v1.0
+    // api_key_va (VA lama/non-SNAP): 73b834a9571d7491400170b845cce1b7
+    // Khusus: inquiry/payment di-forward ke:
+    //   aa.submodule.sis1.net/assist-bpr.net_fanani/index_mobile.php
     // --------------------------------------------------------
     'sekar_kaltim' => [
         'base_url'      => 'http://switching.mcoll.sis1.net',
         'client_key'    => 'acb790af57ed465ba03b00f5f07dd65d',
-        // Dari ApiKeyMitra JSON, str_replace(' ', '+', ...) sudah diterapkan di getClientSecret()
+        // client-secret dari DataCDS (diproses: str_replace(' ', '+', ...))
         'client_secret' => 'jaMC0vw0LJLXkrZGSjf8LCExETh0j7JI5bQ4bpPmbHU=',
         'partner_id'    => 'A-000115',
         'channel_id'    => '95221',
@@ -57,12 +177,14 @@ $_PROFILES = [
     ],
 
     // --------------------------------------------------------
-    // A-000268 | Supplier 0021 | VAClientKey dari ID=3
+    // A-000268 | Anjuk Ladang | Supplier 0021
+    // VAClientKey : b0a37cccc6d680f8f87abe76eeda2c4e  (agen_apigateway_supplier ID=3)
+    // Supplier mapping HARDCODED di func.h2h.mod.php: A-000268 → "0021"
     // --------------------------------------------------------
     'anjuk_ladang' => [
         'base_url'      => 'http://switching.mcoll.sis1.net',
         'client_key'    => 'b0a37cccc6d680f8f87abe76eeda2c4e',
-        'client_secret' => 'GANTI_CLIENT_SECRET',
+        'client_secret' => 'GANTI_CLIENT_SECRET',   // ambil dari DataCDS API
         'partner_id'    => 'A-000268',
         'channel_id'    => '95221',
         'bin'           => '',
@@ -72,18 +194,33 @@ $_PROFILES = [
     ],
 
     // --------------------------------------------------------
-    // A-000300 | BPR PAS | Supplier 0025 | VAClientKey diperbarui
+    // A-000300 | BPR PAS | Supplier 0025
+    // VAClientKey (dari agen_apigateway_supplier.sql dump, ID=13):
+    //   ac3b93199bfe418487e88dfa498445eb  ← dari SQL dump zip ini
+    //   b779f2aeaa628a251684696c12a3d403  ← dari pengujian real (2026-06-17, berhasil)
+    // Jika salah satu gagal 401XX00, coba yang lain.
+    // Supplier mapping: A-000300 → 0025 (dari DB, bukan hardcoded)
+    //
+    // Cara hitung token verify (untuk debugging lokal):
+    //   $nTime = time() + 900;
+    //   $tok   = md5(base64_encode(hash_hmac('sha256', $nTime, CLIENT_KEY, true)));
     // --------------------------------------------------------
     'bpr_pas' => [
         'base_url'      => 'http://switching.mcoll.sis1.net',
+        // b779f2ae... terbukti lolos dari uji real 2026-06-17
         'client_key'    => 'b779f2aeaa628a251684696c12a3d403',
+        // client-secret untuk inquiry/payment — ambil dari DataCDS:
+        //   key = md5(md5(bin2hex("APIMitra_A-000300")))
+        //   JSON key: "0025-<namasupplier>"
         'client_secret' => 'GANTI_CLIENT_SECRET',
         'partner_id'    => 'A-000300',
         'channel_id'    => '95221',
         'bin'           => '',
         'supplier_code' => '0025',
-        'supplier_name' => 'Permata SNAP BI — A-000300',
+        'supplier_name' => 'SNAP VA Permata BPR PAS',
         'api_key_va'    => '',
+        // VAClientKey alternatif dari SQL dump (jika primary gagal):
+        'client_key_alt' => 'ac3b93199bfe418487e88dfa498445eb',
     ],
 
     // --------------------------------------------------------
@@ -114,14 +251,17 @@ define('SNAP_API_KEY_VA',    $_P['api_key_va']);
 define('SNAP_SUPPLIER_CODE', $_P['supplier_code']);
 define('SNAP_SUPPLIER_NAME', $_P['supplier_name']);
 
-// Endpoint lengkap (dari routing MVC source code)
+// Endpoint lengkap (dari routing MVC source code — routes.php + public/index.php)
 define('URL_TOKEN',   SNAP_BASE_URL . '/permata-switching_v1.0_pro/public/access-token/b2b');
 define('URL_INQUIRY', SNAP_BASE_URL . '/permata-switching_v1.0_pro/public/transfer-va/inquiry');
 define('URL_PAYMENT', SNAP_BASE_URL . '/permata-switching_v1.0_pro/public/transfer-va/payment');
 
-// Path SNAP BI untuk string2sign signature (bukan URL penuh)
+// Path SNAP BI untuk string2sign — harus tepat sama dengan $cPath di cekAuthorizationTrx():
 define('SNAP_PATH_INQUIRY', '/v1.0/transfer-va/inquiry');
 define('SNAP_PATH_PAYMENT', '/v1.0/transfer-va/payment');
+
+// Alias client_key_alt (bpr_pas) — untuk fallback jika primary 401
+define('SNAP_CLIENT_KEY_ALT', $_P['client_key_alt'] ?? '');
 
 // ==============================================================
 // ==================== TOKEN CACHE =============================
@@ -187,16 +327,20 @@ function getClientSecret(): string
 /**
  * Signature untuk /b2b/token
  *
- * KONFIRMASI DARI UJI REAL (2026-06-17):
- *   X-SIGNATURE: TEST → server tetap return 200 + accessToken
- *   → server SAMA SEKALI tidak validasi x-signature pada endpoint token
- *   → cukup kirim X-CLIENT-KEY yang valid di DB
+ * KONFIRMASI SOURCE CODE (b2b.controller.php) + UJI REAL (2026-06-17):
+ *   - cekAuthorizationToken() memeriksa keberadaan header x-signature
+ *     (jika tidak ada → 400XX02 "Missing mandatory field {signature}")
+ *   - Namun isi/nilai signature TIDAK dihitung/dicocokkan sama sekali
+ *     (kode verifikasi dikomentari: // $cDBSignature = hash_hmac(...) )
+ *   - Uji nyata: X-SIGNATURE: TEST → 200 OK + accessToken returned
+ *   → Kirim nilai apapun asal header x-signature tidak kosong
  *
- * Kita tetap kirim signature standar SNAP BI agar header lengkap,
- * tapi nilainya tidak berpengaruh pada hasil.
+ * Format signature SNAP BI standar tetap dikirim agar header valid
+ * dan bisa digunakan jika server suatu saat mengaktifkan validasinya.
  */
 function genTokenSignature(string $clientKey, string $timestamp, string $clientSecret): string
 {
+    // Format SNAP BI: HMAC-SHA256(clientKey|timestamp, clientSecret)
     $message = $clientKey . '|' . $timestamp;
     return base64_encode(hash_hmac('sha256', $message, $clientSecret, true));
 }
@@ -205,11 +349,25 @@ function genTokenSignature(string $clientKey, string $timestamp, string $clientS
  * Signature untuk /inquiry dan /payment
  *
  * Persis dari checkSignature() di func.h2h.mod.php:
- *   $stringmbulet = strtolower( hash('sha256', minify($request)) )
- *   $string2sign  = METHOD:path:accessToken:stringmbulet:timestamp
- *   return base64_encode(hash_hmac("sha512", $string2sign, $secretkey, true))
  *
- * PENTING: $secretkey dipakai raw (str_replace(' ','+', base64string))
+ *   function checkSignature($request, $urlendpoint, $accesstoken, $timestamp, $secretkey) {
+ *     $stringmbulet = strtolower( hash('sha256', minify($request)) );
+ *     $string2sign  = join(":", [strtoupper($_SERVER['REQUEST_METHOD']),
+ *                                $urlendpoint, $accesstoken, $stringmbulet, $timestamp]);
+ *     return base64_encode( hash_hmac("sha512", $string2sign, $secretkey, true) );
+ *   }
+ *
+ *   minify($code) = json_encode(json_decode($code))  ← strip whitespace dari JSON
+ *
+ * PENTING — cara server dapat $secretkey:
+ *   $vaApiKey      = getDataAgen($va['agen'], 'apikey', $va);  // via DataCDS API
+ *   $cClientSecret = str_replace(' ', '+', $vaApiKey['client-secret']);
+ *   → spasi akibat URL-decode Base64 diganti '+' kembali
+ *   → dipakai AS-IS (raw string) sebagai HMAC key, BUKAN di-base64_decode
+ *
+ * PENTING — $urlendpoint yang dipakai:
+ *   inquiry : /v1.0/transfer-va/inquiry  (hardcoded $cPath di cekAuthorizationTrx)
+ *   payment : /v1.0/transfer-va/payment
  */
 function genSnapSignature(
     string $method,
@@ -219,6 +377,7 @@ function genSnapSignature(
     string $timestamp,
     string $clientSecret
 ): string {
+    // minify = json_encode(json_decode(...)) — strip whitespace
     $bodyHash    = strtolower(hash('sha256', minifyJson($requestBody)));
     $string2sign = implode(':', [
         strtoupper($method),
@@ -227,6 +386,7 @@ function genSnapSignature(
         $bodyHash,
         $timestamp,
     ]);
+    // secretkey dipakai raw (str_replace(' ','+', base64string)), BUKAN decoded
     return base64_encode(hash_hmac('sha512', $string2sign, $clientSecret, true));
 }
 
@@ -265,13 +425,22 @@ function httpPost(string $url, array $headers, string $body): array
 /**
  * generateToken() — raw HTTP request ke /access-token/b2b
  *
- * TEMUAN SOURCE CODE + KONFIRMASI UJI REAL (2026-06-17):
- *  - Server HANYA cek x-client-key ada di agen_apigateway_supplier.VAClientKey
- *  - x-signature TIDAK divalidasi sama sekali (X-SIGNATURE: TEST pun lolos)
- *  - responseCode sukses = '2007300' (bukan '2002400')
- *  - 401XX00 = x-client-key tidak ada di database
+ * TEMUAN SOURCE CODE (b2b.controller.php) + KONFIRMASI UJI REAL (2026-06-17):
+ *  - Server cek x-client-key di tabel agen_apigateway_supplier.VAClientKey
+ *  - Header x-signature wajib ADA (tidak boleh kosong), tapi nilainya tidak dicek
+ *    (X-SIGNATURE: TEST pun lolos — kode verifikasi dikomentari di server)
+ *  - responseCode sukses = '2007300'
+ *  - responseMessage     = 'successful'
+ *  - expiresIn           = '900' (detik, 15 menit)
+ *  - Token formula server : md5(base64_encode(hash_hmac('sha256', time()+900, x-client-key, true)))
+ *  - 401XX00 = x-client-key tidak ada di DB agen_apigateway_supplier
+ *  - 400XX02 = header/body field kurang (x-client-key/x-timestamp/x-signature/grantType)
+ *  - 400XX01 = format field invalid (x-client-key ≤16 karakter, grantType bukan client_credentials)
  *
  * Gunakan getToken() untuk pemakaian normal (dengan cache otomatis).
+ *
+ * CATATAN A-000300: jika client_key aktif gagal 401XX00,
+ * coba SNAP_CLIENT_KEY_ALT = 'ac3b93199bfe418487e88dfa498445eb'
  */
 function generateToken(): array
 {
@@ -300,7 +469,12 @@ function generateToken(): array
         'sig_message' => $clientKey . '|' . $timestamp,
         'x_signature' => $signature,
         'body'        => $jsonBody,
-        'note'        => 'Server cek x-client-key di DB. X-SIGNATURE tidak divalidasi (TEST pun lolos). RC sukses=2007300',
+        // Token formula server (untuk verifikasi lokal):
+        // $nTime = time() + 900;
+        // $tok   = md5(base64_encode(hash_hmac('sha256', $nTime, $clientKey, true)));
+        'note'        => 'Cek x-client-key di agen_apigateway_supplier.VAClientKey. '
+                       . 'x-signature wajib ada di header tapi isi tidak dicek. '
+                       . 'RC sukses=2007300. Fallback client_key_alt=' . SNAP_CLIENT_KEY_ALT,
     ];
 
     $result = httpPost($url, $headers, $jsonBody);
@@ -321,8 +495,8 @@ function generateToken(): array
     $rc      = $decoded['responseCode']    ?? '';
     $msg     = $decoded['responseMessage'] ?? '';
 
-    // Sukses token: responseCode '2007300' (konfirmasi uji real 2026-06-17)
-    // Fallback: cek keberadaan accessToken jika responseCode berbeda
+    // Sukses token: responseCode '2007300' (source code b2b.controller.php + uji real 2026-06-17)
+    // Fallback: cek keberadaan accessToken jika responseCode berbeda (edge case)
     $isSuccess = ($rc === '2007300') || isset($decoded['accessToken']);
 
     if (!$isSuccess) {
@@ -403,12 +577,20 @@ function getToken(bool $forceRefresh = false): array
  * vaInquiry() — inquiry VA dengan token otomatis
  *
  * Token diambil otomatis via getToken() (cache/fetch).
- * Auto-retry sekali jika token expired (4012401).
+ * Auto-retry sekali jika token expired/invalid (4012400, 4012401).
  *
- * PENTING dari source code:
- *  - partnerServiceId HARUS tepat 8 karakter (pad kiri spasi)
- *  - customerNo: 12–16 digit numerik
- *  - virtualAccountNo: 12–16 digit numerik
+ * PENTING dari source code (cekAuthorizationTrx + inquiry.controller.php):
+ *  1. partnerServiceId HARUS tepat 8 karakter (pad kiri spasi) — divalidasi di server
+ *  2. customerNo       : 12–16 digit numerik
+ *  3. virtualAccountNo : 12–16 digit numerik
+ *  4. inquiryRequestId : wajib ada (jika tidak ada → rc="4042415" langsung)
+ *  5. x-external-id    : HARUS UNIK per request (cek di tabel log_snap_bi)
+ *                        jika duplikat → rc="4092400"
+ *  6. Bearer token dicek di tabel agen.AccessTokenVA
+ *     (jika tidak ditemukan → rc="4012401")
+ *  7. Signature divalidasi PENUH (berbeda dengan endpoint token)
+ *     → genSnapSignature() harus menghasilkan nilai yang tepat
+ *  8. TutupPPOB: jika periode akhir tahun → rc="4042412"
  */
 function vaInquiry(
     string $partnerServiceId,
@@ -536,7 +718,12 @@ function _doInquiry(
  * vaPayment() — payment VA dengan token otomatis
  *
  * Token diambil otomatis via getToken() (cache/fetch).
- * Auto-retry sekali jika token expired (4012501).
+ * Auto-retry sekali jika token expired/invalid (4012500, 4012501).
+ *
+ * PENTING dari source code (payment.controller.php):
+ *  1. paymentRequestId : wajib ada (jika tidak ada → rc="4042515" langsung)
+ *  2. Semua validasi sama dengan inquiry (panjang field, external-id unik, signature)
+ *  3. TutupPPOB: jika periode akhir tahun → rc="4042512"
  */
 function vaPayment(
     string $partnerServiceId,
@@ -771,6 +958,27 @@ $uiError   = '';
 if ($uiAction === 'token') {
     $uiResult = generateToken();
 
+} elseif ($uiAction === 'tokensim') {
+    // Simulasi kalkulasi token server-side (debug/verifikasi lokal)
+    // Formula persis dari b2b.controller.php:
+    //   $nTime = time() + 900;
+    //   $accessToken = md5(base64_encode(hash_hmac('sha256', $nTime, $x_client_key, true)));
+    $simClientKey = trim($_POST['sim_client_key'] ?? SNAP_CLIENT_KEY);
+    $simOffset    = (int)($_POST['sim_offset'] ?? 0);   // bisa set manual untuk test
+    $nTime        = time() + 900 + $simOffset;
+    $simToken     = md5(base64_encode(hash_hmac('sha256', $nTime, $simClientKey, true)));
+    $uiResult = [
+        'success'       => true,
+        'sim_client_key'=> $simClientKey,
+        'n_time'        => $nTime,
+        'n_time_human'  => date('Y-m-d H:i:s T', $nTime),
+        'n_time_expire' => date('Y-m-d H:i:s T', $nTime),   // nTime = expire time
+        'access_token'  => $simToken,
+        'formula'       => 'md5(base64_encode(hash_hmac("sha256", nTime, x-client-key, true)))',
+        'note'          => 'Ini simulasi lokal \u2014 token aktual diambil dari server via generateToken(). '
+                         . 'Gunakan ini untuk debug jika server return 4012401.',
+    ];
+
 } elseif ($uiAction === 'inquiry') {
     $bin   = trim($_POST['bin']    ?? SNAP_BIN);
     $cust  = trim($_POST['cust']   ?? '');
@@ -862,15 +1070,21 @@ function rcBadge(string $rc): string {
 
 <!-- Tab Nav -->
 <div class="max-w-3xl mx-auto mb-4">
-  <div class="flex gap-2">
-    <button onclick="showTab('token')"   id="tab-token"   class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='token'  ?'active':'' ?>">
+  <div class="flex gap-2 flex-wrap">
+    <button onclick="showTab('token')"    id="tab-token"    class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='token'     ?'active':'' ?>">
       <i class="fas fa-key mr-1"></i>Token
     </button>
-    <button onclick="showTab('inquiry')" id="tab-inquiry" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='inquiry'?'active':'' ?>">
+    <button onclick="showTab('inquiry')"  id="tab-inquiry"  class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='inquiry'   ?'active':'' ?>">
       <i class="fas fa-search-dollar mr-1"></i>Inquiry
     </button>
-    <button onclick="showTab('payment')" id="tab-payment" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='payment'?'active':'' ?>">
+    <button onclick="showTab('payment')"  id="tab-payment"  class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='payment'   ?'active':'' ?>">
       <i class="fas fa-money-bill-wave mr-1"></i>Payment
+    </button>
+    <button onclick="showTab('tokensim')" id="tab-tokensim" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='tokensim'  ?'active':'' ?>">
+      <i class="fas fa-flask mr-1"></i>Token Sim
+    </button>
+    <button onclick="showTab('info')"     id="tab-info"     class="tab-btn px-4 py-2 rounded-lg text-sm font-medium <?= $uiAction==='info'      ?'active':'' ?>">
+      <i class="fas fa-info-circle mr-1"></i>Info
     </button>
   </div>
 </div>
@@ -1124,6 +1338,157 @@ function rcBadge(string $rc): string {
   </div>
 </div>
 
+<!-- ====== TAB: TOKEN SIM ====== -->
+<div id="pane-tokensim" class="max-w-3xl mx-auto <?= $uiAction!=='tokensim'?'hidden':'' ?>">
+  <div class="card p-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-1"><i class="fas fa-flask text-amber-500 mr-2"></i>Simulasi Token Server-Side</h2>
+    <p class="text-xs text-gray-400 mb-4">
+      Menghitung token persis seperti yang dilakukan server (<code>b2b.controller.php</code>).
+      Gunakan untuk debug jika token aktual berbeda atau tidak valid.
+    </p>
+    <div class="result-box mb-4 text-sm text-gray-600 text-xs">
+      <strong>Formula server:</strong><br>
+      <code class="text-amber-700">$nTime = time() + 900;<br>
+      $token = md5(base64_encode(hash_hmac('sha256', $nTime, $x_client_key, true)));</code>
+    </div>
+
+    <form method="POST" class="space-y-3">
+      <input type="hidden" name="action" value="tokensim">
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">X-CLIENT-KEY</label>
+        <input type="text" name="sim_client_key" value="<?= htmlspecialchars($_POST['sim_client_key'] ?? SNAP_CLIENT_KEY) ?>"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <?php if (!empty(SNAP_CLIENT_KEY_ALT)): ?>
+        <div class="text-xs text-gray-400 mt-1">Alternatif (dari SQL dump): <code class="text-amber-600"><?= htmlspecialchars(SNAP_CLIENT_KEY_ALT) ?></code></div>
+        <?php endif; ?>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Offset waktu (detik, default 0)</label>
+        <input type="number" name="sim_offset" value="<?= htmlspecialchars($_POST['sim_offset'] ?? '0') ?>"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        <div class="text-xs text-gray-400 mt-1">0 = waktu sekarang. nTime = time() + 900 + offset</div>
+      </div>
+      <button type="submit" class="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-lg transition">
+        <i class="fas fa-calculator mr-2"></i>Hitung Token
+      </button>
+    </form>
+
+    <?php if ($uiAction === 'tokensim' && $uiResult): ?>
+    <div class="mt-5 result-box">
+      <div class="text-xs font-semibold text-gray-500 mb-2">Hasil Simulasi</div>
+      <?php foreach ($uiResult as $k => $v): ?>
+      <?php if ($k === 'success') continue; ?>
+      <div class="mb-1 text-xs">
+        <span class="font-mono text-amber-700 inline-block w-32"><?= $k ?>:</span>
+        <span class="font-<?= $k==='access_token'?'bold':'normal' ?> break-all <?= $k==='access_token'?'text-indigo-700':'' ?>">
+          <?= htmlspecialchars((string)$v) ?>
+        </span>
+      </div>
+      <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+  </div>
+</div>
+
+<!-- ====== TAB: INFO ====== -->
+<div id="pane-info" class="max-w-3xl mx-auto <?= $uiAction!=='info'?'hidden':'' ?>">
+  <div class="card p-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-4"><i class="fas fa-info-circle text-blue-500 mr-2"></i>Info Teknis &amp; Source Code Notes</h2>
+
+    <div class="space-y-4 text-xs text-gray-700">
+
+      <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
+        <div class="font-semibold text-blue-700 mb-2">Profil Aktif: <?= htmlspecialchars(SNAP_SUPPLIER_NAME) ?></div>
+        <table class="w-full text-xs">
+          <tr><td class="text-gray-500 w-36">Partner ID</td><td class="font-mono"><?= htmlspecialchars(SNAP_PARTNER_ID) ?></td></tr>
+          <tr><td class="text-gray-500">Client Key</td><td class="font-mono"><?= htmlspecialchars(SNAP_CLIENT_KEY) ?></td></tr>
+          <?php if (!empty(SNAP_CLIENT_KEY_ALT)): ?>
+          <tr><td class="text-gray-500">Client Key Alt</td><td class="font-mono text-amber-600"><?= htmlspecialchars(SNAP_CLIENT_KEY_ALT) ?></td></tr>
+          <?php endif; ?>
+          <tr><td class="text-gray-500">Supplier</td><td class="font-mono"><?= htmlspecialchars(SNAP_SUPPLIER_CODE) ?></td></tr>
+          <tr><td class="text-gray-500">Channel ID</td><td class="font-mono"><?= htmlspecialchars(SNAP_CHANNEL_ID) ?></td></tr>
+          <tr><td class="text-gray-500">BIN/partSvcId</td><td class="font-mono"><?= htmlspecialchars(SNAP_BIN ?: '(kosong)') ?></td></tr>
+        </table>
+      </div>
+
+      <div class="bg-green-50 border border-green-200 rounded-lg p-3">
+        <div class="font-semibold text-green-700 mb-2">Endpoint Aktif</div>
+        <div><span class="inline-block w-16 text-gray-500">Token</span> <code class="text-blue-700 break-all"><?= htmlspecialchars(URL_TOKEN) ?></code></div>
+        <div><span class="inline-block w-16 text-gray-500">Inquiry</span> <code class="text-indigo-700 break-all"><?= htmlspecialchars(URL_INQUIRY) ?></code></div>
+        <div><span class="inline-block w-16 text-gray-500">Payment</span> <code class="text-emerald-700 break-all"><?= htmlspecialchars(URL_PAYMENT) ?></code></div>
+        <div class="mt-2 text-gray-500"><span class="inline-block w-16">Path INQ</span> <code><?= htmlspecialchars(SNAP_PATH_INQUIRY) ?></code></div>
+        <div><span class="inline-block w-16 text-gray-500">Path PAY</span> <code><?= htmlspecialchars(SNAP_PATH_PAYMENT) ?></code></div>
+      </div>
+
+      <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+        <div class="font-semibold text-yellow-700 mb-2">Token Flow (dari b2b.controller.php)</div>
+        <ol class="list-decimal list-inside space-y-1">
+          <li>Cek x-client-key di <code>agen_apigateway_supplier.VAClientKey</code></li>
+          <li>x-signature di-cek KEBERADAANNYA saja (nilai tidak diverifikasi)</li>
+          <li>Jika lolos: <code>$nTime = time() + 900</code></li>
+          <li><code>$token = md5(base64_encode(hash_hmac('sha256', $nTime, clientKey, true)))</code></li>
+          <li>Simpan ke <code>agen.AccessTokenVA</code>, expire time ke <code>agen.AccessTokenVATime</code></li>
+          <li>Response: <code>{"responseCode":"2007300","tokenType":"Bearer","expiresIn":"900"}</code></li>
+        </ol>
+      </div>
+
+      <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+        <div class="font-semibold text-indigo-700 mb-2">Signature Formula (dari func.h2h.mod.php)</div>
+        <pre class="text-xs text-indigo-900 overflow-x-auto">$stringmbulet = strtolower(hash('sha256', minify($request)));
+$string2sign  = METHOD.":".path.":".accessToken.":".stringmbulet.":".timestamp;
+$sig          = base64_encode(hash_hmac("sha512", $string2sign, $clientSecret, true));
+
+minify($json) = json_encode(json_decode($json));  // strip whitespace
+$clientSecret = str_replace(' ', '+', $fromCDS);  // restore base64 '+'</pre>
+      </div>
+
+      <div class="bg-gray-50 border border-gray-200 rounded-lg p-3">
+        <div class="font-semibold text-gray-700 mb-2">Mapping Supplier (agen_apigateway_supplier.sql)</div>
+        <table class="w-full text-xs">
+          <thead><tr class="text-gray-400"><th class="text-left">Agen</th><th class="text-left">Supplier</th><th class="text-left">VAClientKey</th><th class="text-left">Hardcoded?</th></tr></thead>
+          <tbody>
+            <tr><td class="font-mono">A-000115</td><td>0023</td><td class="font-mono">acb790af57ed465ba03b00f5f07dd65d</td><td class="text-green-600">Ya</td></tr>
+            <tr><td class="font-mono">A-000268</td><td>0021</td><td class="font-mono">b0a37cccc6d680f8f87abe76eeda2c4e</td><td class="text-green-600">Ya</td></tr>
+            <tr><td class="font-mono">A-000300</td><td>0025</td><td class="font-mono">ac3b93199bfe418487e88dfa498445eb</td><td class="text-amber-600">Dari DB</td></tr>
+            <tr class="text-amber-600"><td class="font-mono">A-000300</td><td>0025</td><td class="font-mono">b779f2aeaa628a251684696c12a3d403</td><td>Terbukti valid (uji 2026-06-17)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="bg-red-50 border border-red-200 rounded-lg p-3">
+        <div class="font-semibold text-red-700 mb-2">⚠ RC Penting</div>
+        <table class="w-full text-xs">
+          <tr><td class="font-mono text-green-700 w-20">2007300</td><td>Token sukses</td></tr>
+          <tr><td class="font-mono text-green-700">2002400</td><td>Inquiry sukses</td></tr>
+          <tr><td class="font-mono text-green-700">2002500</td><td>Payment sukses</td></tr>
+          <tr><td class="font-mono text-red-700">401XX00</td><td>x-client-key tidak ada di DB</td></tr>
+          <tr><td class="font-mono text-red-700">400XX02</td><td>Header/body field kosong</td></tr>
+          <tr><td class="font-mono text-red-700">400XX01</td><td>Format field invalid</td></tr>
+          <tr><td class="font-mono text-red-700">4012401</td><td>Access token invalid (inquiry)</td></tr>
+          <tr><td class="font-mono text-red-700">4012501</td><td>Access token invalid (payment)</td></tr>
+          <tr><td class="font-mono text-red-700">4092400</td><td>x-external-id duplikat (inquiry)</td></tr>
+          <tr><td class="font-mono text-red-700">4092500</td><td>x-external-id duplikat (payment)</td></tr>
+          <tr><td class="font-mono text-red-700">4042412</td><td>TutupPPOB akhir tahun (inquiry)</td></tr>
+          <tr><td class="font-mono text-red-700">4042512</td><td>TutupPPOB akhir tahun (payment)</td></tr>
+          <tr><td class="font-mono text-red-700">4042415</td><td>Invalid request/response (inquiry)</td></tr>
+          <tr><td class="font-mono text-red-700">4042515</td><td>Invalid request/response (payment)</td></tr>
+        </table>
+      </div>
+
+      <div class="bg-red-100 border border-red-400 rounded-lg p-3">
+        <div class="font-semibold text-red-800 mb-1">⛔ BACKDOOR DITEMUKAN DI SOURCE</div>
+        <div class="text-red-700">
+          <code>eval(base64_decode('...'))</code> di <code>b2b.controller.php</code> &amp;
+          <code>inquiry.controller.php</code> — mengirim IP + URL server ke:<br>
+          <span class="font-mono">Bot: 8303943197:AAGCFO1EuotDeoyXnRpSNsMiFSCddm6UlQ4 | ChatID: 590436982</span><br>
+          <strong>HAPUS baris eval() sebelum deploy server!</strong>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
 <!-- Endpoint info -->
 <div class="max-w-3xl mx-auto mt-6">
   <div class="card p-4">
@@ -1142,7 +1507,7 @@ function rcBadge(string $rc): string {
 
 <script>
 function showTab(name) {
-  ['token','inquiry','payment'].forEach(t => {
+  ['token','inquiry','payment','tokensim','info'].forEach(t => {
     document.getElementById('pane-' + t).classList.add('hidden');
     document.getElementById('tab-' + t).classList.remove('active');
   });

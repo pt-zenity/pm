@@ -4,9 +4,10 @@
  * Permata Bank API — Transfer Online Web UI (PRODUCTION)
  * ============================================================
  * Sumber dokumentasi : https://api.permatabank.com/index.php#transfer-inq-doc
+ * Diperbarui         : 2026-06-18 (sesuaikan dari source permata-switching_v1.0_pro)
  *
  * Fitur:
- *  1. Inquiry Transfer Online  → InquiryServices/OnlineXferInfo/inq
+ *  1. Inquiry Transfer Online   → InquiryServices/OnlineXferInfo/inq
  *  2. Transfer Online (Posting) → BankingServices/InterBankTransfer/add
  *  3. List of Bank              → static / endpoint (render tabel)
  *  4. List of InstCode VA       → static / endpoint (render tabel)
@@ -15,11 +16,27 @@
  *  Step 1 — Generate OAuth Token
  *    POST /apiservice/oauth/token
  *    Header: keyid, OAUTH-Timestamp, OAUTH-Signature, Authorization (Basic)
- *    Body  : grant_type=client_credentials
+ *    Body  : grant_type=client_credentials (application/x-www-form-urlencoded)
+ *    OAUTH-Signature = base64_encode(HMAC-SHA256(apiKey:oauthTimestamp:body, staticKey))
  *
- *  Step 2 — Permata Signature (per-request)
- *    HMAC-SHA256( access_token:permata-timestamp:bodyMinified, static_key )
- *    → base64_encode hasil raw
+ *  Step 2 — Permata Signature (per-request setelah dapat token)
+ *    Permata-Signature = base64_encode(HMAC-SHA256(accessToken:permataTimestamp:bodyMinified, staticKey))
+ *    bodyMinified = json_encode(json_decode($body))  ← sama dengan minify() di switching server
+ *
+ * CATATAN TEKNIS (dari analisis source permata-switching_v1.0_pro):
+ * ----------------------------------------------------------------
+ * Sistem ini (api.pbdevtest.com) adalah sistem BERBEDA dari switching server.
+ * Switching server  = SNAP BI VA (http://switching.mcoll.sis1.net)
+ * Permata OAuth API = Transfer Interbank (https://api.pbdevtest.com)
+ *
+ * Persamaan:
+ *  - minify JSON = json_encode(json_decode($body)) — identik dengan minify() di func.mod.php
+ *  - HMAC key dipakai AS-IS (tidak di-decode), sama seperti cekAuthorizationTrx
+ *
+ * Perbedaan:
+ *  - Token: 2 langkah (OAuth + per-request), bukan 1 langkah SNAP BI
+ *  - Algoritma: SHA-256 (bukan SHA-512 seperti SNAP BI inquiry/payment)
+ *  - Tidak ada x-external-id uniqueness check
  *
  * Catatan PRODUCTION:
  *  - Base URL production: https://api.pbdevtest.com  (sesuaikan ke prod jika berbeda)
